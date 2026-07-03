@@ -1,0 +1,19 @@
+{
+  "name": "PageTurn AI",
+  "short_name": "PageTurn",
+  "icons": [
+    {
+      "src": "/favicon-32.png",
+      "sizes": "32x32",
+      "type": "image/png"
+    },
+    {
+      "src": "/apple-touch-icon.png",
+      "sizes": "180x180",
+      "type": "image/png"
+    }
+  ],
+  "theme_color": "#2B5D4E",
+  "background_color": "#FAFAF8",
+  "display": "standalone"
+}
