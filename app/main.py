@@ -1,7 +1,8 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.routers import health
+from app.database import init_db
+from app.routers import health, subjects
 
 
 app = FastAPI(
@@ -23,4 +24,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.on_event("startup")
+def on_startup() -> None:
+    init_db()
+
+
 app.include_router(health.router)
+app.include_router(subjects.router)

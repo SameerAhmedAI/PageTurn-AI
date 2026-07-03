@@ -1,1 +1,6 @@
-"""Database models will be introduced in Phase 2."""
+"""Database models for PageTurn AI."""
+
+from app.models.document import Document
+from app.models.subject import Subject
+
+__all__ = ["Document", "Subject"]
