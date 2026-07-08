@@ -14,7 +14,6 @@ import {
   History,
   Layers,
   ListChecks,
-  Loader2,
   MessageSquare,
   Moon,
   Plus,
@@ -92,14 +91,14 @@ const statusStyles = {
 
 const statusIcons = {
   processing: Clock3,
-  extracting: Loader2,
-  chunking: Loader2,
+  extracting: Clock3,
+  chunking: Clock3,
   ready: CheckCircle2,
   failed: AlertTriangle,
 };
 
 export default function App() {
-  const [theme, setTheme] = useState<"light" | "dark">("light");
+  const [theme, setTheme] = useState<"light" | "dark">(() => getInitialTheme());
   const [health, setHealth] = useState<HealthState>({ status: "loading" });
   const [subjects, setSubjects] = useState<SubjectsState>({ status: "loading" });
   const [dashboardStats, setDashboardStats] = useState<DashboardStatsState>({ status: "loading" });
@@ -129,6 +128,7 @@ export default function App() {
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", theme === "dark");
+    window.localStorage.setItem("pageturn-theme", theme);
   }, [theme]);
 
   useEffect(() => {
@@ -300,6 +300,7 @@ export default function App() {
           <nav className="mt-8 space-y-1">
             {navItems.map((item) => (
               <button
+                aria-current={item.active ? "page" : undefined}
                 key={item.label}
                 className={`group flex h-11 w-full items-center gap-3 rounded-lg px-3 text-left text-sm font-medium transition duration-150 ease-out hover:-translate-y-px hover:shadow-interactive ${
                   item.active
@@ -334,6 +335,7 @@ export default function App() {
               </div>
               <button
                 aria-label="Toggle dark mode"
+                aria-pressed={theme === "dark"}
                 className="flex h-10 w-10 items-center justify-center rounded-lg border border-border bg-surface text-text-secondary transition duration-150 ease-out hover:-translate-y-px hover:text-text-primary hover:shadow-interactive"
                 type="button"
                 onClick={() => setTheme((current) => (current === "light" ? "dark" : "light"))}
@@ -595,7 +597,7 @@ function SubjectDetail({
             type="button"
           >
             {isUploading ? (
-              <Loader2 aria-hidden="true" className="h-6 w-6 animate-spin text-accent" />
+              <SkeletonDot className="h-6 w-6" tone="accent" />
             ) : (
               <Upload aria-hidden="true" className="h-6 w-6 text-accent" />
             )}
@@ -772,6 +774,7 @@ function ChatPanel({ subject }: { subject: Subject }) {
           <div className="grid grid-cols-2 rounded-lg border border-border bg-surface-alt p-1">
             {(["simple", "university"] as ExplanationMode[]).map((option) => (
               <button
+                aria-pressed={mode === option}
                 className={`h-8 rounded-md px-3 text-xs font-medium transition duration-150 ease-out ${
                   mode === option ? "bg-surface text-accent" : "text-text-secondary"
                 }`}
@@ -806,6 +809,7 @@ function ChatPanel({ subject }: { subject: Subject }) {
             {history.status === "ready" &&
               history.data.map((session) => (
                 <button
+                  aria-pressed={activeSessionId === session.id}
                   className={`w-full rounded-lg border p-3 text-left transition duration-150 ease-out hover:-translate-y-px hover:shadow-interactive ${
                     activeSessionId === session.id
                       ? "border-accent bg-accent-soft"
@@ -859,7 +863,7 @@ function ChatPanel({ subject }: { subject: Subject }) {
                   <div className="mt-4 flex flex-wrap gap-2">
                     {turn.citations.map((citation) => (
                       <a
-                        className="inline-flex items-center gap-2 rounded-lg bg-accent-soft px-3 py-1.5 font-mono text-xs text-accent"
+                        className="inline-flex items-center gap-2 rounded-lg bg-accent-soft px-3 py-1.5 font-mono text-xs text-accent transition duration-150 ease-out hover:-translate-y-px hover:bg-surface hover:shadow-interactive"
                         href={getDocumentFileUrl(citation.document_id, citation.page_number)}
                         key={`${citation.document_id}-${citation.page_number}-${turn.id}`}
                         rel="noreferrer"
@@ -891,7 +895,7 @@ function ChatPanel({ subject }: { subject: Subject }) {
               type="submit"
             >
               {isAnswering ? (
-                <Loader2 aria-hidden="true" className="h-4 w-4 animate-spin" />
+                <SkeletonDot className="h-4 w-4" tone="light" />
               ) : (
                 <Send aria-hidden="true" className="h-4 w-4" />
               )}
@@ -990,6 +994,7 @@ function StudyToolsPanel({ subject }: { subject: Subject }) {
         <div className="grid gap-2 sm:grid-cols-3">
           {tools.map((tool) => (
             <button
+              aria-pressed={activeType === tool.type}
               className={`flex h-10 items-center justify-center gap-2 rounded-lg border px-3 text-sm font-medium transition duration-150 ease-out hover:-translate-y-px hover:shadow-interactive ${
                 activeType === tool.type
                   ? "border-accent bg-accent-soft text-accent"
@@ -1020,7 +1025,7 @@ function StudyToolsPanel({ subject }: { subject: Subject }) {
           type="button"
         >
           {isGenerating ? (
-            <Loader2 aria-hidden="true" className="h-4 w-4 animate-spin" />
+            <SkeletonDot className="h-4 w-4" tone="light" />
           ) : (
             <Plus aria-hidden="true" className="h-4 w-4" />
           )}
@@ -1050,6 +1055,7 @@ function StudyToolsPanel({ subject }: { subject: Subject }) {
             {generatedSets.status === "ready" &&
               generatedSets.data.map((item) => (
                 <button
+                  aria-pressed={generated?.id === item.id}
                   className={`w-full rounded-lg border p-3 text-left transition duration-150 ease-out hover:-translate-y-px hover:shadow-interactive ${
                     generated?.id === item.id
                       ? "border-accent bg-accent-soft"
@@ -1144,14 +1150,14 @@ function GeneratedExportActions({
   return (
     <div className="flex flex-wrap gap-2">
       <a
-        className="inline-flex h-9 items-center gap-2 rounded-lg border border-border px-3 text-xs font-medium text-text-secondary transition duration-150 ease-out hover:-translate-y-px hover:text-text-primary hover:shadow-interactive"
+        className="inline-flex h-9 items-center gap-2 rounded-lg border border-border px-3 text-xs font-medium text-text-secondary transition duration-150 ease-out hover:-translate-y-px hover:bg-surface hover:text-text-primary hover:shadow-interactive"
         href={getGeneratedExportUrl(subjectId, content.id, "markdown")}
       >
         <Download aria-hidden="true" className="h-3.5 w-3.5" />
         Markdown
       </a>
       <a
-        className="inline-flex h-9 items-center gap-2 rounded-lg border border-border px-3 text-xs font-medium text-text-secondary transition duration-150 ease-out hover:-translate-y-px hover:text-text-primary hover:shadow-interactive"
+        className="inline-flex h-9 items-center gap-2 rounded-lg border border-border px-3 text-xs font-medium text-text-secondary transition duration-150 ease-out hover:-translate-y-px hover:bg-surface hover:text-text-primary hover:shadow-interactive"
         href={getGeneratedExportUrl(subjectId, content.id, "pdf")}
       >
         <Download aria-hidden="true" className="h-3.5 w-3.5" />
@@ -1326,7 +1332,7 @@ function CitationList({ citations }: { citations: Citation[] }) {
     <div className="mt-4 flex flex-wrap gap-2">
       {citations.map((citation) => (
         <a
-          className="inline-flex items-center gap-2 rounded-lg bg-accent-soft px-3 py-1.5 font-mono text-xs text-accent"
+          className="inline-flex items-center gap-2 rounded-lg bg-accent-soft px-3 py-1.5 font-mono text-xs text-accent transition duration-150 ease-out hover:-translate-y-px hover:bg-surface hover:shadow-interactive"
           href={getDocumentFileUrl(citation.document_id, citation.page_number)}
           key={`${citation.document_id}-${citation.page_number}-${citation.chunk_text.slice(0, 16)}`}
           rel="noreferrer"
@@ -1362,11 +1368,7 @@ function DocumentRow({ document }: { document: DocumentRecord }) {
         >
           <Icon
             aria-hidden="true"
-            className={`h-3.5 w-3.5 ${
-              document.upload_status === "extracting" || document.upload_status === "chunking"
-                ? "animate-spin"
-                : ""
-            }`}
+            className="h-3.5 w-3.5"
           />
           {formatStatus(document.upload_status)}
         </span>
@@ -1446,7 +1448,7 @@ function NewSubjectModal({
             disabled={isSubmitting}
             type="submit"
           >
-            {isSubmitting && <Loader2 aria-hidden="true" className="h-4 w-4 animate-spin" />}
+            {isSubmitting && <SkeletonDot className="h-4 w-4" tone="light" />}
             Create
           </button>
         </div>
@@ -1475,6 +1477,19 @@ function IconButton({
       <Icon aria-hidden="true" className="h-4 w-4" />
     </button>
   );
+}
+
+function SkeletonDot({
+  className,
+  tone = "surface",
+}: {
+  className: string;
+  tone?: "accent" | "light" | "surface";
+}) {
+  const toneClass =
+    tone === "light" ? "bg-white/50" : tone === "accent" ? "bg-accent/35" : "bg-border";
+
+  return <span aria-hidden="true" className={`animate-pulse rounded ${toneClass} ${className}`} />;
 }
 
 function SubjectGridSkeleton() {
@@ -1518,6 +1533,19 @@ function getMessage(error: unknown): string {
 
 function formatStatus(status: DocumentRecord["upload_status"]): string {
   return status.charAt(0).toUpperCase() + status.slice(1);
+}
+
+function getInitialTheme(): "light" | "dark" {
+  try {
+    const storedTheme = window.localStorage.getItem("pageturn-theme");
+    if (storedTheme === "light" || storedTheme === "dark") {
+      return storedTheme;
+    }
+  } catch {
+    return "light";
+  }
+
+  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
 }
 
 function isTerminalStatus(status: DocumentRecord["upload_status"]): boolean {
