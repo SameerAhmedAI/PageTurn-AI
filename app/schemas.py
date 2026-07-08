@@ -40,3 +40,19 @@ class CitationRead(BaseModel):
     filename: str
     page_number: int
     chunk_text: str
+
+
+class GenerateRequest(BaseModel):
+    type: Literal["summary", "mcq", "flashcard"]
+    topic: str | None = Field(default=None, max_length=300)
+    count: int = Field(default=5, ge=1, le=10)
+
+
+class GeneratedContentRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    subject_id: int
+    type: str
+    content_json: dict
+    created_at: datetime

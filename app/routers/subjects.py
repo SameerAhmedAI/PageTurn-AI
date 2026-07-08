@@ -8,8 +8,17 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.database import STORAGE_DIR, get_db
-from app.models import ChatMessage, ChatSession, Citation, Document, Subject
-from app.schemas import ChatRequest, CitationRead, DocumentRead, SubjectCreate, SubjectRead
+from app.models import ChatMessage, ChatSession, Citation, Document, GeneratedContent, Subject
+from app.schemas import (
+    ChatRequest,
+    CitationRead,
+    DocumentRead,
+    GeneratedContentRead,
+    GenerateRequest,
+    SubjectCreate,
+    SubjectRead,
+)
+from app.services.generation import generate_study_content
 from app.services.indexing import retrieve_chunks
 from app.services.llm import generate_answer
 from app.services.pdf_processing import process_pdf_document
@@ -124,6 +133,41 @@ def get_document_file(document_id: int, db: Session = Depends(get_db)) -> FileRe
         pdf_path,
         media_type="application/pdf",
         filename=document.filename,
+    )
+
+
+@router.post("/{subject_id}/generate", response_model=GeneratedContentRead)
+def generate_content_for_subject(
+    subject_id: int,
+    payload: GenerateRequest,
+    db: Session = Depends(get_db),
+) -> GeneratedContentRead:
+    subject = db.get(Subject, subject_id)
+    if subject is None:
+        raise HTTPException(status_code=404, detail="Subject not found.")
+
+    content = generate_study_content(
+        db=db,
+        subject_id=subject_id,
+        content_type=payload.type,
+        topic=payload.topic,
+        count=payload.count,
+    )
+    generated = GeneratedContent(
+        subject_id=subject_id,
+        type=payload.type,
+        content_json=json.dumps(content),
+    )
+    db.add(generated)
+    db.commit()
+    db.refresh(generated)
+
+    return GeneratedContentRead(
+        id=generated.id,
+        subject_id=generated.subject_id,
+        type=generated.type,
+        content_json=content,
+        created_at=generated.created_at,
     )
 
 

@@ -33,6 +33,57 @@ export type Citation = {
   chunk_text: string;
 };
 
+export type GenerationType = "summary" | "mcq" | "flashcard";
+
+export type SummaryContent = {
+  type: "summary";
+  topic: string | null;
+  title: string;
+  sections: Array<{
+    heading: string;
+    bullets: string[];
+  }>;
+  citations: Citation[];
+  error?: string;
+};
+
+export type McqContent = {
+  type: "mcq";
+  topic: string | null;
+  questions: Array<{
+    id: number;
+    question: string;
+    options: string[];
+    correct_index: number;
+    explanation: string;
+    citation: Citation;
+  }>;
+  error?: string;
+};
+
+export type FlashcardContent = {
+  type: "flashcard";
+  topic: string | null;
+  cards: Array<{
+    id: number;
+    front: string;
+    back: string;
+    citation: Citation;
+    review_state: string;
+  }>;
+  error?: string;
+};
+
+export type GeneratedContentPayload = SummaryContent | McqContent | FlashcardContent;
+
+export type GeneratedContent = {
+  id: number;
+  subject_id: number;
+  type: GenerationType;
+  content_json: GeneratedContentPayload;
+  created_at: string;
+};
+
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000";
 
 export async function fetchHealth(): Promise<HealthResponse> {
@@ -72,6 +123,30 @@ export async function uploadDocument(
 
 export function getDocumentFileUrl(documentId: number, pageNumber: number): string {
   return `${API_BASE_URL}/subjects/document-files/${documentId}#page=${pageNumber}`;
+}
+
+export async function generateStudyContent({
+  subjectId,
+  type,
+  topic,
+  count,
+}: {
+  subjectId: number;
+  type: GenerationType;
+  topic?: string;
+  count?: number;
+}): Promise<GeneratedContent> {
+  return request<GeneratedContent>(`/subjects/${subjectId}/generate`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      type,
+      topic: topic?.trim() || null,
+      count: count ?? 5,
+    }),
+  });
 }
 
 export async function streamChatAnswer({

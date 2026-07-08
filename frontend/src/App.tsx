@@ -10,6 +10,7 @@ import {
   Folder,
   GraduationCap,
   Layers,
+  ListChecks,
   Loader2,
   MessageSquare,
   Moon,
@@ -31,12 +32,15 @@ import {
   fetchDocuments,
   fetchHealth,
   fetchSubjects,
+  generateStudyContent,
   getDocumentFileUrl,
   streamChatAnswer,
   uploadDocument,
   type Citation,
   type DocumentRecord,
   type ExplanationMode,
+  type GeneratedContent,
+  type GenerationType,
   type HealthResponse,
   type Subject,
 } from "./lib/api";
@@ -565,6 +569,7 @@ function SubjectDetail({
       </div>
 
       <ChatPanel subject={subject} />
+      <StudyToolsPanel subject={subject} />
     </motion.section>
   );
 }
@@ -702,7 +707,7 @@ function ChatPanel({ subject }: { subject: Subject }) {
                     title={citation.chunk_text}
                   >
                     <Quote aria-hidden="true" className="h-3.5 w-3.5" />
-                    {citation.filename} · p.{citation.page_number}
+                    {citation.filename} - p.{citation.page_number}
                   </a>
                 ))}
               </div>
@@ -734,6 +739,319 @@ function ChatPanel({ subject }: { subject: Subject }) {
         </button>
       </form>
     </section>
+  );
+}
+
+function StudyToolsPanel({ subject }: { subject: Subject }) {
+  const [activeType, setActiveType] = useState<GenerationType>("summary");
+  const [topic, setTopic] = useState("");
+  const [generated, setGenerated] = useState<GeneratedContent | null>(null);
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [mcqAnswers, setMcqAnswers] = useState<Record<number, number>>({});
+  const [flippedCards, setFlippedCards] = useState<Record<number, boolean>>({});
+  const [cardStates, setCardStates] = useState<Record<number, string>>({});
+
+  async function handleGenerate(type: GenerationType = activeType) {
+    setActiveType(type);
+    setIsGenerating(true);
+    setError(null);
+    setMcqAnswers({});
+    setFlippedCards({});
+    setCardStates({});
+
+    try {
+      const result = await generateStudyContent({
+        subjectId: subject.id,
+        type,
+        topic,
+        count: type === "summary" ? 6 : 5,
+      });
+      setGenerated(result);
+    } catch (caughtError) {
+      setError(getMessage(caughtError));
+    } finally {
+      setIsGenerating(false);
+    }
+  }
+
+  const tools = [
+    { type: "summary" as const, label: "Summary", icon: FileText },
+    { type: "mcq" as const, label: "MCQs", icon: ListChecks },
+    { type: "flashcard" as const, label: "Flashcards", icon: Layers },
+  ];
+
+  return (
+    <section className="rounded-lg border border-border bg-surface p-5">
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+        <div className="flex items-center gap-3">
+          <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-accent-soft text-accent">
+            <Layers aria-hidden="true" className="h-5 w-5" />
+          </div>
+          <div>
+            <h2 className="text-lg font-semibold text-text-primary">Study Tools</h2>
+            <p className="text-sm text-text-secondary">Generate citation-backed study material.</p>
+          </div>
+        </div>
+
+        <div className="grid gap-2 sm:grid-cols-3">
+          {tools.map((tool) => (
+            <button
+              className={`flex h-10 items-center justify-center gap-2 rounded-lg border px-3 text-sm font-medium transition duration-150 ease-out hover:-translate-y-px hover:shadow-interactive ${
+                activeType === tool.type
+                  ? "border-accent bg-accent-soft text-accent"
+                  : "border-border bg-surface text-text-secondary hover:text-text-primary"
+              }`}
+              key={tool.type}
+              onClick={() => handleGenerate(tool.type)}
+              type="button"
+            >
+              <tool.icon aria-hidden="true" className="h-4 w-4" />
+              {tool.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="mt-5 flex flex-col gap-3 md:flex-row">
+        <input
+          className="h-11 min-w-0 flex-1 rounded-lg border border-border bg-surface-alt px-3 text-sm text-text-primary outline-none transition duration-150 ease-out focus:border-accent"
+          onChange={(event) => setTopic(event.target.value)}
+          placeholder="Optional topic, e.g. access rules"
+          value={topic}
+        />
+        <button
+          className="flex h-11 items-center justify-center gap-2 rounded-lg bg-accent px-4 text-sm font-medium text-white transition duration-150 ease-out hover:-translate-y-px hover:bg-accent-hover hover:shadow-interactive disabled:cursor-not-allowed disabled:opacity-70"
+          disabled={isGenerating}
+          onClick={() => handleGenerate(activeType)}
+          type="button"
+        >
+          {isGenerating ? (
+            <Loader2 aria-hidden="true" className="h-4 w-4 animate-spin" />
+          ) : (
+            <Plus aria-hidden="true" className="h-4 w-4" />
+          )}
+          Generate
+        </button>
+      </div>
+
+      {error && <p className="mt-3 text-sm font-medium text-error">{error}</p>}
+
+      <div className="mt-5 rounded-lg border border-border bg-surface-alt p-4">
+        {!generated && !isGenerating && (
+          <div className="flex min-h-36 items-center justify-center text-center">
+            <div>
+              <FileText aria-hidden="true" className="mx-auto h-6 w-6 text-accent" />
+              <p className="mt-3 text-sm font-medium text-text-primary">
+                Pick a study tool to generate material.
+              </p>
+            </div>
+          </div>
+        )}
+
+        {isGenerating && <DocumentListSkeleton />}
+
+        {generated?.content_json.error && (
+          <ErrorPanel message={generated.content_json.error} />
+        )}
+
+        {generated?.content_json.type === "summary" && (
+          <SummaryViewer content={generated.content_json} />
+        )}
+
+        {generated?.content_json.type === "mcq" && (
+          <McqViewer
+            answers={mcqAnswers}
+            content={generated.content_json}
+            onAnswer={(questionId, optionIndex) =>
+              setMcqAnswers((current) => ({ ...current, [questionId]: optionIndex }))
+            }
+          />
+        )}
+
+        {generated?.content_json.type === "flashcard" && (
+          <FlashcardViewer
+            cardStates={cardStates}
+            content={generated.content_json}
+            flippedCards={flippedCards}
+            onFlip={(cardId) =>
+              setFlippedCards((current) => ({ ...current, [cardId]: !current[cardId] }))
+            }
+            onState={(cardId, state) =>
+              setCardStates((current) => ({ ...current, [cardId]: state }))
+            }
+          />
+        )}
+      </div>
+    </section>
+  );
+}
+
+function SummaryViewer({ content }: { content: Extract<GeneratedContent["content_json"], { type: "summary" }> }) {
+  return (
+    <div>
+      <h3 className="text-lg font-semibold text-text-primary">{content.title}</h3>
+      <div className="mt-4 space-y-5">
+        {content.sections.map((section) => (
+          <section key={section.heading}>
+            <h4 className="text-sm font-semibold text-text-primary">{section.heading}</h4>
+            <ul className="mt-3 space-y-2">
+              {section.bullets.map((bullet) => (
+                <li className="text-sm leading-6 text-text-secondary" key={bullet}>
+                  {bullet}
+                </li>
+              ))}
+            </ul>
+          </section>
+        ))}
+      </div>
+      <CitationList citations={content.citations} />
+    </div>
+  );
+}
+
+function McqViewer({
+  answers,
+  content,
+  onAnswer,
+}: {
+  answers: Record<number, number>;
+  content: Extract<GeneratedContent["content_json"], { type: "mcq" }>;
+  onAnswer: (questionId: number, optionIndex: number) => void;
+}) {
+  return (
+    <div className="space-y-4">
+      {content.questions.map((question) => {
+        const selected = answers[question.id];
+        const isAnswered = selected !== undefined;
+
+        return (
+          <section className="rounded-lg border border-border bg-surface p-4" key={question.id}>
+            <p className="text-sm font-semibold text-text-primary">
+              {question.id}. {question.question}
+            </p>
+            <div className="mt-3 grid gap-2">
+              {question.options.map((option, optionIndex) => {
+                const isCorrect = optionIndex === question.correct_index;
+                const isSelected = selected === optionIndex;
+                const stateClass =
+                  isAnswered && isCorrect
+                    ? "border-accent bg-accent-soft text-accent"
+                    : isAnswered && isSelected
+                      ? "border-error bg-red-50 text-error dark:bg-red-950/30"
+                      : "border-border bg-surface-alt text-text-primary";
+
+                return (
+                  <button
+                    className={`rounded-lg border px-3 py-2 text-left text-sm transition duration-150 ease-out hover:-translate-y-px hover:shadow-interactive ${stateClass}`}
+                    key={option}
+                    onClick={() => onAnswer(question.id, optionIndex)}
+                    type="button"
+                  >
+                    {option}
+                  </button>
+                );
+              })}
+            </div>
+            {isAnswered && (
+              <div className="mt-3 text-sm leading-6 text-text-secondary">
+                {question.explanation}
+                <CitationList citations={[question.citation]} />
+              </div>
+            )}
+          </section>
+        );
+      })}
+    </div>
+  );
+}
+
+function FlashcardViewer({
+  cardStates,
+  content,
+  flippedCards,
+  onFlip,
+  onState,
+}: {
+  cardStates: Record<number, string>;
+  content: Extract<GeneratedContent["content_json"], { type: "flashcard" }>;
+  flippedCards: Record<number, boolean>;
+  onFlip: (cardId: number) => void;
+  onState: (cardId: number, state: string) => void;
+}) {
+  return (
+    <div className="grid gap-4 md:grid-cols-2">
+      {content.cards.map((card) => {
+        const isFlipped = Boolean(flippedCards[card.id]);
+        const reviewState = cardStates[card.id];
+
+        return (
+          <section className="rounded-lg border border-border bg-surface p-4" key={card.id}>
+            <button
+              className="min-h-36 w-full rounded-lg border border-border bg-surface-alt p-4 text-left transition duration-150 ease-out hover:-translate-y-px hover:shadow-interactive"
+              onClick={() => onFlip(card.id)}
+              type="button"
+            >
+              <p className="text-xs font-medium uppercase text-text-secondary">
+                {isFlipped ? "Back" : "Front"}
+              </p>
+              <p className="mt-3 text-sm leading-6 text-text-primary">
+                {isFlipped ? card.back : card.front}
+              </p>
+            </button>
+            {isFlipped && <CitationList citations={[card.citation]} />}
+            <div className="mt-3 grid grid-cols-2 gap-2">
+              <button
+                className={`h-9 rounded-lg border text-sm font-medium transition duration-150 ease-out hover:-translate-y-px hover:shadow-interactive ${
+                  reviewState === "review"
+                    ? "border-warning bg-surface-alt text-warning"
+                    : "border-border text-text-secondary"
+                }`}
+                onClick={() => onState(card.id, "review")}
+                type="button"
+              >
+                Review it
+              </button>
+              <button
+                className={`h-9 rounded-lg border text-sm font-medium transition duration-150 ease-out hover:-translate-y-px hover:shadow-interactive ${
+                  reviewState === "known"
+                    ? "border-accent bg-accent-soft text-accent"
+                    : "border-border text-text-secondary"
+                }`}
+                onClick={() => onState(card.id, "known")}
+                type="button"
+              >
+                Know it
+              </button>
+            </div>
+          </section>
+        );
+      })}
+    </div>
+  );
+}
+
+function CitationList({ citations }: { citations: Citation[] }) {
+  if (citations.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="mt-4 flex flex-wrap gap-2">
+      {citations.map((citation) => (
+        <a
+          className="inline-flex items-center gap-2 rounded-lg bg-accent-soft px-3 py-1.5 font-mono text-xs text-accent"
+          href={getDocumentFileUrl(citation.document_id, citation.page_number)}
+          key={`${citation.document_id}-${citation.page_number}-${citation.chunk_text.slice(0, 16)}`}
+          rel="noreferrer"
+          target="_blank"
+          title={citation.chunk_text}
+        >
+          <Quote aria-hidden="true" className="h-3.5 w-3.5" />
+          {citation.filename} - p.{citation.page_number}
+        </a>
+      ))}
+    </div>
   );
 }
 
