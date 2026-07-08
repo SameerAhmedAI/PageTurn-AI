@@ -1,7 +1,7 @@
 from pathlib import Path
 import json
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile, Response, status
 from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -11,13 +11,17 @@ from app.database import STORAGE_DIR, get_db
 from app.models import ChatMessage, ChatSession, Citation, Document, GeneratedContent, Subject
 from app.schemas import (
     ChatRequest,
+    ChatMessageRead,
+    ChatSessionRead,
     CitationRead,
+    DashboardStatsRead,
     DocumentRead,
     GeneratedContentRead,
     GenerateRequest,
     SubjectCreate,
     SubjectRead,
 )
+from app.services.export import generated_content_to_markdown, generated_content_to_pdf_bytes
 from app.services.generation import generate_study_content
 from app.services.indexing import retrieve_chunks
 from app.services.llm import generate_answer
@@ -25,6 +29,16 @@ from app.services.pdf_processing import process_pdf_document
 
 
 router = APIRouter(prefix="/subjects", tags=["subjects"])
+
+
+@router.get("/dashboard/stats", response_model=DashboardStatsRead)
+def get_dashboard_stats(db: Session = Depends(get_db)) -> DashboardStatsRead:
+    return DashboardStatsRead(
+        subject_count=int(db.scalar(select(func.count(Subject.id))) or 0),
+        document_count=int(db.scalar(select(func.count(Document.id))) or 0),
+        chat_session_count=int(db.scalar(select(func.count(ChatSession.id))) or 0),
+        generated_set_count=int(db.scalar(select(func.count(GeneratedContent.id))) or 0),
+    )
 
 
 @router.post("", response_model=SubjectRead, status_code=status.HTTP_201_CREATED)
@@ -119,6 +133,67 @@ def list_documents(subject_id: int, db: Session = Depends(get_db)) -> list[Docum
     return list(db.scalars(statement).all())
 
 
+@router.get("/{subject_id}/generated", response_model=list[GeneratedContentRead])
+def list_generated_content(
+    subject_id: int,
+    db: Session = Depends(get_db),
+) -> list[GeneratedContentRead]:
+    subject = db.get(Subject, subject_id)
+    if subject is None:
+        raise HTTPException(status_code=404, detail="Subject not found.")
+
+    statement = (
+        select(GeneratedContent)
+        .where(GeneratedContent.subject_id == subject_id)
+        .order_by(GeneratedContent.created_at.desc(), GeneratedContent.id.desc())
+    )
+
+    return [
+        GeneratedContentRead(
+            id=content.id,
+            subject_id=content.subject_id,
+            type=content.type,
+            content_json=json.loads(content.content_json),
+            created_at=content.created_at,
+        )
+        for content in db.scalars(statement).all()
+    ]
+
+
+@router.get("/{subject_id}/export/{content_id}")
+def export_generated_content(
+    subject_id: int,
+    content_id: int,
+    format: str = "markdown",
+    db: Session = Depends(get_db),
+) -> Response:
+    generated = db.get(GeneratedContent, content_id)
+    if generated is None or generated.subject_id != subject_id:
+        raise HTTPException(status_code=404, detail="Generated content not found.")
+
+    content = json.loads(generated.content_json)
+    requested_format = format.lower()
+    base_filename = f"pageturn-{generated.type}-{generated.id}"
+
+    if requested_format in {"markdown", "md"}:
+        markdown = generated_content_to_markdown(content)
+        return Response(
+            content=markdown,
+            media_type="text/markdown",
+            headers={"Content-Disposition": f'attachment; filename="{base_filename}.md"'},
+        )
+
+    if requested_format == "pdf":
+        pdf_bytes = generated_content_to_pdf_bytes(content)
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="{base_filename}.pdf"'},
+        )
+
+    raise HTTPException(status_code=400, detail="Export format must be markdown or pdf.")
+
+
 @router.get("/document-files/{document_id}")
 def get_document_file(document_id: int, db: Session = Depends(get_db)) -> FileResponse:
     document = db.get(Document, document_id)
@@ -185,9 +260,14 @@ def chat_with_subject(
     answer = generate_answer(payload.question, retrieved, payload.explanation_mode)
     citations = [] if answer.lower().startswith("not found") else build_citations(retrieved)
 
-    session = ChatSession(subject_id=subject_id)
-    db.add(session)
-    db.flush()
+    if payload.session_id is None:
+        session = ChatSession(subject_id=subject_id)
+        db.add(session)
+        db.flush()
+    else:
+        session = db.get(ChatSession, payload.session_id)
+        if session is None or session.subject_id != subject_id:
+            raise HTTPException(status_code=404, detail="Chat session not found.")
 
     user_message = ChatMessage(
         session_id=session.id,
@@ -215,10 +295,29 @@ def chat_with_subject(
     db.commit()
 
     return StreamingResponse(
-        stream_chat_response(answer, citations),
+        stream_chat_response(session.id, answer, citations),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@router.get("/{subject_id}/chat/history", response_model=list[ChatSessionRead])
+def get_chat_history(
+    subject_id: int,
+    db: Session = Depends(get_db),
+) -> list[ChatSessionRead]:
+    subject = db.get(Subject, subject_id)
+    if subject is None:
+        raise HTTPException(status_code=404, detail="Subject not found.")
+
+    statement = (
+        select(ChatSession)
+        .where(ChatSession.subject_id == subject_id)
+        .order_by(ChatSession.created_at.desc(), ChatSession.id.desc())
+    )
+    sessions = db.scalars(statement).all()
+
+    return [build_chat_session_read(db, session) for session in sessions]
 
 
 def build_citations(retrieved_chunks) -> list[CitationRead]:
@@ -250,7 +349,48 @@ def build_citations(retrieved_chunks) -> list[CitationRead]:
     return citations
 
 
-def stream_chat_response(answer: str, citations: list[CitationRead]):
+def build_chat_session_read(db: Session, session: ChatSession) -> ChatSessionRead:
+    message_statement = (
+        select(ChatMessage)
+        .where(ChatMessage.session_id == session.id)
+        .order_by(ChatMessage.created_at, ChatMessage.id)
+    )
+    messages = []
+    title = "New chat"
+
+    for message in db.scalars(message_statement).all():
+        citation_reads = [
+            CitationRead(
+                document_id=citation.document_id,
+                filename=citation.document.filename,
+                page_number=citation.page_number,
+                chunk_text=citation.chunk_text,
+            )
+            for citation in message.citations
+        ]
+        if title == "New chat" and message.role == "user":
+            title = message.content[:80]
+        messages.append(
+            ChatMessageRead(
+                id=message.id,
+                role=message.role,
+                content=message.content,
+                created_at=message.created_at,
+                citations=citation_reads,
+            )
+        )
+
+    return ChatSessionRead(
+        id=session.id,
+        subject_id=session.subject_id,
+        created_at=session.created_at,
+        title=title,
+        messages=messages,
+    )
+
+
+def stream_chat_response(session_id: int, answer: str, citations: list[CitationRead]):
+    yield sse_event("session", {"id": session_id})
     for token in answer.split(" "):
         yield sse_event("token", {"text": token + " "})
 

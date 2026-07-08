@@ -84,6 +84,29 @@ export type GeneratedContent = {
   created_at: string;
 };
 
+export type DashboardStats = {
+  subject_count: number;
+  document_count: number;
+  chat_session_count: number;
+  generated_set_count: number;
+};
+
+export type ChatHistoryMessage = {
+  id: number;
+  role: "user" | "assistant";
+  content: string;
+  created_at: string;
+  citations: Citation[];
+};
+
+export type ChatHistorySession = {
+  id: number;
+  subject_id: number;
+  created_at: string;
+  title: string;
+  messages: ChatHistoryMessage[];
+};
+
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000";
 
 export async function fetchHealth(): Promise<HealthResponse> {
@@ -92,6 +115,10 @@ export async function fetchHealth(): Promise<HealthResponse> {
 
 export async function fetchSubjects(): Promise<Subject[]> {
   return request<Subject[]>("/subjects");
+}
+
+export async function fetchDashboardStats(): Promise<DashboardStats> {
+  return request<DashboardStats>("/subjects/dashboard/stats");
 }
 
 export async function createSubject(name: string): Promise<Subject> {
@@ -149,18 +176,38 @@ export async function generateStudyContent({
   });
 }
 
+export async function fetchGeneratedContent(subjectId: number): Promise<GeneratedContent[]> {
+  return request<GeneratedContent[]>(`/subjects/${subjectId}/generated`);
+}
+
+export async function fetchChatHistory(subjectId: number): Promise<ChatHistorySession[]> {
+  return request<ChatHistorySession[]>(`/subjects/${subjectId}/chat/history`);
+}
+
+export function getGeneratedExportUrl(
+  subjectId: number,
+  contentId: number,
+  format: "markdown" | "pdf",
+): string {
+  return `${API_BASE_URL}/subjects/${subjectId}/export/${contentId}?format=${format}`;
+}
+
 export async function streamChatAnswer({
   subjectId,
   question,
   explanationMode,
+  sessionId,
   onToken,
   onCitations,
+  onSession,
 }: {
   subjectId: number;
   question: string;
   explanationMode: ExplanationMode;
+  sessionId?: number | null;
   onToken: (text: string) => void;
   onCitations: (citations: Citation[]) => void;
+  onSession?: (sessionId: number) => void;
 }): Promise<void> {
   const response = await fetch(`${API_BASE_URL}/subjects/${subjectId}/chat`, {
     method: "POST",
@@ -170,6 +217,7 @@ export async function streamChatAnswer({
     body: JSON.stringify({
       question,
       explanation_mode: explanationMode,
+      session_id: sessionId ?? null,
     }),
   });
 
@@ -196,12 +244,12 @@ export async function streamChatAnswer({
     buffer = events.pop() ?? "";
 
     for (const eventBlock of events) {
-      handleSseEvent(eventBlock, onToken, onCitations);
+      handleSseEvent(eventBlock, onToken, onCitations, onSession);
     }
   }
 
   if (buffer.trim()) {
-    handleSseEvent(buffer, onToken, onCitations);
+    handleSseEvent(buffer, onToken, onCitations, onSession);
   }
 }
 
@@ -232,6 +280,7 @@ function handleSseEvent(
   eventBlock: string,
   onToken: (text: string) => void,
   onCitations: (citations: Citation[]) => void,
+  onSession?: (sessionId: number) => void,
 ) {
   const lines = eventBlock.split("\n");
   const event = lines.find((line) => line.startsWith("event: "))?.slice(7);
@@ -241,7 +290,15 @@ function handleSseEvent(
     return;
   }
 
-  const data = JSON.parse(dataLine.slice(6)) as { text?: string; citations?: Citation[] };
+  const data = JSON.parse(dataLine.slice(6)) as {
+    id?: number;
+    text?: string;
+    citations?: Citation[];
+  };
+
+  if (event === "session" && typeof data.id === "number") {
+    onSession?.(data.id);
+  }
 
   if (event === "token" && typeof data.text === "string") {
     onToken(data.text);

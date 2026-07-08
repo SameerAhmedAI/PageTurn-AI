@@ -3,12 +3,15 @@ import type { RefObject } from "react";
 import {
   AlertTriangle,
   ArrowLeft,
+  BarChart3,
   CheckCircle2,
   Clock3,
+  Download,
   FileText,
   FileUp,
   Folder,
   GraduationCap,
+  History,
   Layers,
   ListChecks,
   Loader2,
@@ -29,14 +32,20 @@ import { AnimatePresence, motion } from "framer-motion";
 import { Logo } from "./components/Logo";
 import {
   createSubject,
+  fetchChatHistory,
+  fetchDashboardStats,
   fetchDocuments,
+  fetchGeneratedContent,
   fetchHealth,
   fetchSubjects,
   generateStudyContent,
   getDocumentFileUrl,
+  getGeneratedExportUrl,
   streamChatAnswer,
   uploadDocument,
+  type ChatHistorySession,
   type Citation,
+  type DashboardStats,
   type DocumentRecord,
   type ExplanationMode,
   type GeneratedContent,
@@ -53,6 +62,9 @@ type Loadable<T> =
 type HealthState = Loadable<HealthResponse>;
 type SubjectsState = Loadable<Subject[]>;
 type DocumentsState = Loadable<DocumentRecord[]>;
+type DashboardStatsState = Loadable<DashboardStats>;
+type ChatHistoryState = Loadable<ChatHistorySession[]>;
+type GeneratedContentState = Loadable<GeneratedContent[]>;
 
 type ChatTurn = {
   id: number;
@@ -90,6 +102,7 @@ export default function App() {
   const [theme, setTheme] = useState<"light" | "dark">("light");
   const [health, setHealth] = useState<HealthState>({ status: "loading" });
   const [subjects, setSubjects] = useState<SubjectsState>({ status: "loading" });
+  const [dashboardStats, setDashboardStats] = useState<DashboardStatsState>({ status: "loading" });
   const [selectedSubjectId, setSelectedSubjectId] = useState<number | null>(null);
   const [documents, setDocuments] = useState<DocumentsState>({ status: "ready", data: [] });
   const [isSubjectModalOpen, setIsSubjectModalOpen] = useState(false);
@@ -134,6 +147,7 @@ export default function App() {
       });
 
     loadSubjects();
+    loadDashboardStats();
 
     return () => {
       isMounted = false;
@@ -210,6 +224,15 @@ export default function App() {
       .catch((error: unknown) => setSubjects({ status: "error", message: getMessage(error) }));
   }
 
+  function loadDashboardStats() {
+    setDashboardStats({ status: "loading" });
+    fetchDashboardStats()
+      .then((data) => setDashboardStats({ status: "ready", data }))
+      .catch((error: unknown) =>
+        setDashboardStats({ status: "error", message: getMessage(error) }),
+      );
+  }
+
   async function handleCreateSubject(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setSubjectError(null);
@@ -230,6 +253,7 @@ export default function App() {
       setSelectedSubjectId(subject.id);
       setSubjectName("");
       setIsSubjectModalOpen(false);
+      loadDashboardStats();
     } catch (error) {
       setSubjectError(getMessage(error));
     } finally {
@@ -255,6 +279,7 @@ export default function App() {
         setDocuments({ status: "ready", data });
       });
       void fetchSubjects().then((data) => setSubjects({ status: "ready", data }));
+      loadDashboardStats();
     } catch (error) {
       setUploadError(getMessage(error));
     } finally {
@@ -328,7 +353,10 @@ export default function App() {
                 documents={documents}
                 isUploading={isUploading}
                 key="subject-detail"
-                onBack={() => setSelectedSubjectId(null)}
+                onBack={() => {
+                  setSelectedSubjectId(null);
+                  loadDashboardStats();
+                }}
                 onRefresh={() => {
                   setDocuments({ status: "loading" });
                   fetchDocuments(selectedSubject.id)
@@ -346,8 +374,12 @@ export default function App() {
               <SubjectsDashboard
                 key="subjects-dashboard"
                 onCreate={() => setIsSubjectModalOpen(true)}
-                onRefresh={loadSubjects}
+                onRefresh={() => {
+                  loadSubjects();
+                  loadDashboardStats();
+                }}
                 onSelect={setSelectedSubjectId}
+                stats={dashboardStats}
                 subjects={subjects}
               />
             )}
@@ -378,13 +410,25 @@ function SubjectsDashboard({
   onCreate,
   onRefresh,
   onSelect,
+  stats,
   subjects,
 }: {
   onCreate: () => void;
   onRefresh: () => void;
   onSelect: (id: number) => void;
+  stats: DashboardStatsState;
   subjects: SubjectsState;
 }) {
+  const statItems =
+    stats.status === "ready"
+      ? [
+          { label: "Subjects", value: stats.data.subject_count, icon: Folder },
+          { label: "Documents", value: stats.data.document_count, icon: FileText },
+          { label: "Chat sessions", value: stats.data.chat_session_count, icon: MessageSquare },
+          { label: "Generated sets", value: stats.data.generated_set_count, icon: BarChart3 },
+        ]
+      : [];
+
   return (
     <motion.section
       animate={{ opacity: 1, y: 0 }}
@@ -410,6 +454,30 @@ function SubjectsDashboard({
           </button>
         </div>
       </div>
+
+      <section className="grid gap-3 md:grid-cols-4">
+        {stats.status === "loading" &&
+          Array.from({ length: 4 }).map((_, index) => (
+            <div className="rounded-lg border border-border bg-surface p-4" key={index}>
+              <div className="h-4 w-24 rounded bg-surface-alt" />
+              <div className="mt-4 h-7 w-16 rounded bg-surface-alt" />
+            </div>
+          ))}
+        {stats.status === "error" && (
+          <div className="rounded-lg border border-border bg-surface p-4 md:col-span-4">
+            <p className="text-sm font-medium text-error">{stats.message}</p>
+          </div>
+        )}
+        {statItems.map((item) => (
+          <div className="rounded-lg border border-border bg-surface p-4" key={item.label}>
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-xs font-medium uppercase text-text-secondary">{item.label}</p>
+              <item.icon aria-hidden="true" className="h-4 w-4 text-accent" />
+            </div>
+            <p className="mt-3 font-mono text-2xl text-text-primary">{item.value}</p>
+          </div>
+        ))}
+      </section>
 
       {subjects.status === "loading" && <SubjectGridSkeleton />}
       {subjects.status === "error" && <ErrorPanel message={subjects.message} />}
@@ -578,8 +646,44 @@ function ChatPanel({ subject }: { subject: Subject }) {
   const [question, setQuestion] = useState("");
   const [mode, setMode] = useState<ExplanationMode>("university");
   const [turns, setTurns] = useState<ChatTurn[]>([]);
+  const [history, setHistory] = useState<ChatHistoryState>({ status: "loading" });
+  const [activeSessionId, setActiveSessionId] = useState<number | null>(null);
   const [isAnswering, setIsAnswering] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setTurns([]);
+    setActiveSessionId(null);
+    loadHistory();
+  }, [subject.id]);
+
+  function loadHistory() {
+    setHistory({ status: "loading" });
+    fetchChatHistory(subject.id)
+      .then((sessions) => setHistory({ status: "ready", data: sessions }))
+      .catch((caughtError: unknown) =>
+        setHistory({ status: "error", message: getMessage(caughtError) }),
+      );
+  }
+
+  function openSession(session: ChatHistorySession) {
+    setActiveSessionId(session.id);
+    setTurns(
+      session.messages.map((message) => ({
+        id: message.id,
+        role: message.role,
+        content: message.content,
+        citations: message.citations,
+      })),
+    );
+    setError(null);
+  }
+
+  function startNewSession() {
+    setActiveSessionId(null);
+    setTurns([]);
+    setError(null);
+  }
 
   async function handleAsk(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -610,6 +714,8 @@ function ChatPanel({ subject }: { subject: Subject }) {
         subjectId: subject.id,
         question: nextQuestion,
         explanationMode: mode,
+        sessionId: activeSessionId,
+        onSession: (sessionId) => setActiveSessionId(sessionId),
         onToken: (text) => {
           setTurns((current) =>
             current.map((turn) =>
@@ -627,6 +733,7 @@ function ChatPanel({ subject }: { subject: Subject }) {
           );
         },
       });
+      loadHistory();
     } catch (caughtError) {
       setError(getMessage(caughtError));
       setTurns((current) =>
@@ -653,91 +760,146 @@ function ChatPanel({ subject }: { subject: Subject }) {
             <p className="text-sm text-text-secondary">Answers stream with source citations.</p>
           </div>
         </div>
-        <div className="grid grid-cols-2 rounded-lg border border-border bg-surface-alt p-1">
-          {(["simple", "university"] as ExplanationMode[]).map((option) => (
-            <button
-              className={`h-8 rounded-md px-3 text-xs font-medium transition duration-150 ease-out ${
-                mode === option ? "bg-surface text-accent" : "text-text-secondary"
-              }`}
-              key={option}
-              onClick={() => setMode(option)}
-              type="button"
-            >
-              {option === "simple" ? "Simple" : "University"}
-            </button>
-          ))}
+        <div className="flex flex-wrap gap-2">
+          <button
+            className="flex h-9 items-center gap-2 rounded-lg border border-border px-3 text-xs font-medium text-text-secondary transition duration-150 ease-out hover:-translate-y-px hover:text-text-primary hover:shadow-interactive"
+            onClick={startNewSession}
+            type="button"
+          >
+            <Plus aria-hidden="true" className="h-3.5 w-3.5" />
+            New chat
+          </button>
+          <div className="grid grid-cols-2 rounded-lg border border-border bg-surface-alt p-1">
+            {(["simple", "university"] as ExplanationMode[]).map((option) => (
+              <button
+                className={`h-8 rounded-md px-3 text-xs font-medium transition duration-150 ease-out ${
+                  mode === option ? "bg-surface text-accent" : "text-text-secondary"
+                }`}
+                key={option}
+                onClick={() => setMode(option)}
+                type="button"
+              >
+                {option === "simple" ? "Simple" : "University"}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
 
-      <div className="mt-5 min-h-56 space-y-4 rounded-lg border border-border bg-surface-alt p-4">
-        {turns.length === 0 && (
-          <div className="flex h-44 items-center justify-center text-center">
-            <div>
-              <Quote aria-hidden="true" className="mx-auto h-6 w-6 text-accent" />
-              <p className="mt-3 text-sm font-medium text-text-primary">Ask from this subject</p>
+      <div className="mt-5 grid gap-4 lg:grid-cols-[18rem_1fr]">
+        <aside className="rounded-lg border border-border bg-surface-alt p-3">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <History aria-hidden="true" className="h-4 w-4 text-accent" />
+              <p className="text-sm font-semibold text-text-primary">History</p>
             </div>
+            <IconButton ariaLabel="Refresh chat history" icon={RefreshCw} onClick={loadHistory} />
           </div>
-        )}
+          <div className="mt-3 space-y-2">
+            {history.status === "loading" && <DocumentListSkeleton />}
+            {history.status === "error" && <ErrorPanel message={history.message} />}
+            {history.status === "ready" && history.data.length === 0 && (
+              <p className="rounded-lg border border-border bg-surface p-3 text-sm text-text-secondary">
+                No saved chats yet.
+              </p>
+            )}
+            {history.status === "ready" &&
+              history.data.map((session) => (
+                <button
+                  className={`w-full rounded-lg border p-3 text-left transition duration-150 ease-out hover:-translate-y-px hover:shadow-interactive ${
+                    activeSessionId === session.id
+                      ? "border-accent bg-accent-soft"
+                      : "border-border bg-surface"
+                  }`}
+                  key={session.id}
+                  onClick={() => openSession(session)}
+                  type="button"
+                >
+                  <p className="line-clamp-2 text-sm font-medium text-text-primary">
+                    {session.title}
+                  </p>
+                  <p className="mt-1 text-xs text-text-secondary">
+                    {new Date(session.created_at).toLocaleString()}
+                  </p>
+                </button>
+              ))}
+          </div>
+        </aside>
 
-        {turns.map((turn) => (
-          <div
-            className={`max-w-3xl rounded-lg border border-border p-4 ${
-              turn.role === "user" ? "ml-auto bg-surface" : "bg-bg"
-            }`}
-            key={turn.id}
-          >
-            <p className="text-xs font-medium uppercase text-text-secondary">
-              {turn.role === "user" ? "You" : "PageTurn"}
-            </p>
-            <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-text-primary">
-              {turn.content}
-              {isAnswering && turn.role === "assistant" && turn.content && (
-                <span className="ml-1 inline-block h-4 w-1 animate-pulse bg-accent align-middle" />
-              )}
-            </p>
-            {turn.citations && turn.citations.length > 0 && (
-              <div className="mt-4 flex flex-wrap gap-2">
-                {turn.citations.map((citation) => (
-                  <a
-                    className="inline-flex items-center gap-2 rounded-lg bg-accent-soft px-3 py-1.5 font-mono text-xs text-accent"
-                    href={getDocumentFileUrl(citation.document_id, citation.page_number)}
-                    key={`${citation.document_id}-${citation.page_number}`}
-                    rel="noreferrer"
-                    target="_blank"
-                    title={citation.chunk_text}
-                  >
-                    <Quote aria-hidden="true" className="h-3.5 w-3.5" />
-                    {citation.filename} - p.{citation.page_number}
-                  </a>
-                ))}
+        <div>
+          <div className="min-h-56 space-y-4 rounded-lg border border-border bg-surface-alt p-4">
+            {turns.length === 0 && (
+              <div className="flex h-44 items-center justify-center text-center">
+                <div>
+                  <Quote aria-hidden="true" className="mx-auto h-6 w-6 text-accent" />
+                  <p className="mt-3 text-sm font-medium text-text-primary">
+                    Ask from this subject
+                  </p>
+                </div>
               </div>
             )}
+
+            {turns.map((turn) => (
+              <div
+                className={`max-w-3xl rounded-lg border border-border p-4 ${
+                  turn.role === "user" ? "ml-auto bg-surface" : "bg-bg"
+                }`}
+                key={turn.id}
+              >
+                <p className="text-xs font-medium uppercase text-text-secondary">
+                  {turn.role === "user" ? "You" : "PageTurn"}
+                </p>
+                <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-text-primary">
+                  {turn.content}
+                  {isAnswering && turn.role === "assistant" && turn.content && (
+                    <span className="ml-1 inline-block h-4 w-1 animate-pulse bg-accent align-middle" />
+                  )}
+                </p>
+                {turn.citations && turn.citations.length > 0 && (
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    {turn.citations.map((citation) => (
+                      <a
+                        className="inline-flex items-center gap-2 rounded-lg bg-accent-soft px-3 py-1.5 font-mono text-xs text-accent"
+                        href={getDocumentFileUrl(citation.document_id, citation.page_number)}
+                        key={`${citation.document_id}-${citation.page_number}-${turn.id}`}
+                        rel="noreferrer"
+                        target="_blank"
+                        title={citation.chunk_text}
+                      >
+                        <Quote aria-hidden="true" className="h-3.5 w-3.5" />
+                        {citation.filename} - p.{citation.page_number}
+                      </a>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))}
           </div>
-        ))}
+
+          {error && <p className="mt-3 text-sm font-medium text-error">{error}</p>}
+
+          <form className="mt-4 flex flex-col gap-3 md:flex-row" onSubmit={handleAsk}>
+            <input
+              className="h-11 min-w-0 flex-1 rounded-lg border border-border bg-surface-alt px-3 text-sm text-text-primary outline-none transition duration-150 ease-out focus:border-accent"
+              onChange={(event) => setQuestion(event.target.value)}
+              placeholder="Ask a question from the uploaded PDFs"
+              value={question}
+            />
+            <button
+              className="flex h-11 items-center justify-center gap-2 rounded-lg bg-accent px-4 text-sm font-medium text-white transition duration-150 ease-out hover:-translate-y-px hover:bg-accent-hover hover:shadow-interactive disabled:cursor-not-allowed disabled:opacity-70"
+              disabled={isAnswering || !question.trim()}
+              type="submit"
+            >
+              {isAnswering ? (
+                <Loader2 aria-hidden="true" className="h-4 w-4 animate-spin" />
+              ) : (
+                <Send aria-hidden="true" className="h-4 w-4" />
+              )}
+              Ask
+            </button>
+          </form>
+        </div>
       </div>
-
-      {error && <p className="mt-3 text-sm font-medium text-error">{error}</p>}
-
-      <form className="mt-4 flex flex-col gap-3 md:flex-row" onSubmit={handleAsk}>
-        <input
-          className="h-11 min-w-0 flex-1 rounded-lg border border-border bg-surface-alt px-3 text-sm text-text-primary outline-none transition duration-150 ease-out focus:border-accent"
-          onChange={(event) => setQuestion(event.target.value)}
-          placeholder="Ask a question from the uploaded PDFs"
-          value={question}
-        />
-        <button
-          className="flex h-11 items-center justify-center gap-2 rounded-lg bg-accent px-4 text-sm font-medium text-white transition duration-150 ease-out hover:-translate-y-px hover:bg-accent-hover hover:shadow-interactive disabled:cursor-not-allowed disabled:opacity-70"
-          disabled={isAnswering || !question.trim()}
-          type="submit"
-        >
-          {isAnswering ? (
-            <Loader2 aria-hidden="true" className="h-4 w-4 animate-spin" />
-          ) : (
-            <Send aria-hidden="true" className="h-4 w-4" />
-          )}
-          Ask
-        </button>
-      </form>
     </section>
   );
 }
@@ -746,11 +908,35 @@ function StudyToolsPanel({ subject }: { subject: Subject }) {
   const [activeType, setActiveType] = useState<GenerationType>("summary");
   const [topic, setTopic] = useState("");
   const [generated, setGenerated] = useState<GeneratedContent | null>(null);
+  const [generatedSets, setGeneratedSets] = useState<GeneratedContentState>({ status: "loading" });
   const [isGenerating, setIsGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [mcqAnswers, setMcqAnswers] = useState<Record<number, number>>({});
   const [flippedCards, setFlippedCards] = useState<Record<number, boolean>>({});
   const [cardStates, setCardStates] = useState<Record<number, string>>({});
+
+  useEffect(() => {
+    setGenerated(null);
+    loadGeneratedSets();
+  }, [subject.id]);
+
+  function loadGeneratedSets() {
+    setGeneratedSets({ status: "loading" });
+    fetchGeneratedContent(subject.id)
+      .then((sets) => setGeneratedSets({ status: "ready", data: sets }))
+      .catch((caughtError: unknown) =>
+        setGeneratedSets({ status: "error", message: getMessage(caughtError) }),
+      );
+  }
+
+  function openGeneratedSet(nextGenerated: GeneratedContent) {
+    setGenerated(nextGenerated);
+    setActiveType(nextGenerated.type);
+    setMcqAnswers({});
+    setFlippedCards({});
+    setCardStates({});
+    setError(null);
+  }
 
   async function handleGenerate(type: GenerationType = activeType) {
     setActiveType(type);
@@ -768,6 +954,13 @@ function StudyToolsPanel({ subject }: { subject: Subject }) {
         count: type === "summary" ? 6 : 5,
       });
       setGenerated(result);
+      setGeneratedSets((current) => {
+        const existing = current.status === "ready" ? current.data : [];
+        return {
+          status: "ready",
+          data: [result, ...existing.filter((item) => item.id !== result.id)],
+        };
+      });
     } catch (caughtError) {
       setError(getMessage(caughtError));
     } finally {
@@ -837,54 +1030,147 @@ function StudyToolsPanel({ subject }: { subject: Subject }) {
 
       {error && <p className="mt-3 text-sm font-medium text-error">{error}</p>}
 
-      <div className="mt-5 rounded-lg border border-border bg-surface-alt p-4">
-        {!generated && !isGenerating && (
-          <div className="flex min-h-36 items-center justify-center text-center">
-            <div>
-              <FileText aria-hidden="true" className="mx-auto h-6 w-6 text-accent" />
-              <p className="mt-3 text-sm font-medium text-text-primary">
-                Pick a study tool to generate material.
-              </p>
+      <div className="mt-5 grid gap-4 lg:grid-cols-[18rem_1fr]">
+        <aside className="rounded-lg border border-border bg-surface-alt p-3">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <History aria-hidden="true" className="h-4 w-4 text-accent" />
+              <p className="text-sm font-semibold text-text-primary">Generated</p>
             </div>
+            <IconButton ariaLabel="Refresh generated sets" icon={RefreshCw} onClick={loadGeneratedSets} />
           </div>
-        )}
+          <div className="mt-3 space-y-2">
+            {generatedSets.status === "loading" && <DocumentListSkeleton />}
+            {generatedSets.status === "error" && <ErrorPanel message={generatedSets.message} />}
+            {generatedSets.status === "ready" && generatedSets.data.length === 0 && (
+              <p className="rounded-lg border border-border bg-surface p-3 text-sm text-text-secondary">
+                No generated sets yet.
+              </p>
+            )}
+            {generatedSets.status === "ready" &&
+              generatedSets.data.map((item) => (
+                <button
+                  className={`w-full rounded-lg border p-3 text-left transition duration-150 ease-out hover:-translate-y-px hover:shadow-interactive ${
+                    generated?.id === item.id
+                      ? "border-accent bg-accent-soft"
+                      : "border-border bg-surface"
+                  }`}
+                  key={item.id}
+                  onClick={() => openGeneratedSet(item)}
+                  type="button"
+                >
+                  <p className="text-sm font-medium capitalize text-text-primary">{item.type}</p>
+                  <p className="mt-1 line-clamp-2 text-xs text-text-secondary">
+                    {getGeneratedTitle(item)}
+                  </p>
+                  <p className="mt-2 text-xs text-text-secondary">
+                    {new Date(item.created_at).toLocaleString()}
+                  </p>
+                </button>
+              ))}
+          </div>
+        </aside>
 
-        {isGenerating && <DocumentListSkeleton />}
+        <div className="rounded-lg border border-border bg-surface-alt p-4">
+          {!generated && !isGenerating && (
+            <div className="flex min-h-36 items-center justify-center text-center">
+              <div>
+                <FileText aria-hidden="true" className="mx-auto h-6 w-6 text-accent" />
+                <p className="mt-3 text-sm font-medium text-text-primary">
+                  Pick a study tool to generate material.
+                </p>
+              </div>
+            </div>
+          )}
 
-        {generated?.content_json.error && (
-          <ErrorPanel message={generated.content_json.error} />
-        )}
+          {isGenerating && <DocumentListSkeleton />}
 
-        {generated?.content_json.type === "summary" && (
-          <SummaryViewer content={generated.content_json} />
-        )}
+          {generated && !isGenerating && (
+            <div className="mb-4 flex flex-col gap-3 border-b border-border pb-4 md:flex-row md:items-center md:justify-between">
+              <div>
+                <p className="text-xs font-medium uppercase text-text-secondary">Active set</p>
+                <p className="mt-1 text-sm font-semibold capitalize text-text-primary">
+                  {generated.type} - {new Date(generated.created_at).toLocaleString()}
+                </p>
+              </div>
+              <GeneratedExportActions content={generated} subjectId={subject.id} />
+            </div>
+          )}
 
-        {generated?.content_json.type === "mcq" && (
-          <McqViewer
-            answers={mcqAnswers}
-            content={generated.content_json}
-            onAnswer={(questionId, optionIndex) =>
-              setMcqAnswers((current) => ({ ...current, [questionId]: optionIndex }))
-            }
-          />
-        )}
+          {generated?.content_json.error && (
+            <ErrorPanel message={generated.content_json.error} />
+          )}
 
-        {generated?.content_json.type === "flashcard" && (
-          <FlashcardViewer
-            cardStates={cardStates}
-            content={generated.content_json}
-            flippedCards={flippedCards}
-            onFlip={(cardId) =>
-              setFlippedCards((current) => ({ ...current, [cardId]: !current[cardId] }))
-            }
-            onState={(cardId, state) =>
-              setCardStates((current) => ({ ...current, [cardId]: state }))
-            }
-          />
-        )}
+          {generated?.content_json.type === "summary" && (
+            <SummaryViewer content={generated.content_json} />
+          )}
+
+          {generated?.content_json.type === "mcq" && (
+            <McqViewer
+              answers={mcqAnswers}
+              content={generated.content_json}
+              onAnswer={(questionId, optionIndex) =>
+                setMcqAnswers((current) => ({ ...current, [questionId]: optionIndex }))
+              }
+            />
+          )}
+
+          {generated?.content_json.type === "flashcard" && (
+            <FlashcardViewer
+              cardStates={cardStates}
+              content={generated.content_json}
+              flippedCards={flippedCards}
+              onFlip={(cardId) =>
+                setFlippedCards((current) => ({ ...current, [cardId]: !current[cardId] }))
+              }
+              onState={(cardId, state) =>
+                setCardStates((current) => ({ ...current, [cardId]: state }))
+              }
+            />
+          )}
+        </div>
       </div>
     </section>
   );
+}
+
+function GeneratedExportActions({
+  content,
+  subjectId,
+}: {
+  content: GeneratedContent;
+  subjectId: number;
+}) {
+  return (
+    <div className="flex flex-wrap gap-2">
+      <a
+        className="inline-flex h-9 items-center gap-2 rounded-lg border border-border px-3 text-xs font-medium text-text-secondary transition duration-150 ease-out hover:-translate-y-px hover:text-text-primary hover:shadow-interactive"
+        href={getGeneratedExportUrl(subjectId, content.id, "markdown")}
+      >
+        <Download aria-hidden="true" className="h-3.5 w-3.5" />
+        Markdown
+      </a>
+      <a
+        className="inline-flex h-9 items-center gap-2 rounded-lg border border-border px-3 text-xs font-medium text-text-secondary transition duration-150 ease-out hover:-translate-y-px hover:text-text-primary hover:shadow-interactive"
+        href={getGeneratedExportUrl(subjectId, content.id, "pdf")}
+      >
+        <Download aria-hidden="true" className="h-3.5 w-3.5" />
+        PDF
+      </a>
+    </div>
+  );
+}
+
+function getGeneratedTitle(content: GeneratedContent): string {
+  if (content.content_json.type === "summary") {
+    return content.content_json.title;
+  }
+
+  if (content.content_json.type === "mcq") {
+    return `${content.content_json.questions.length} questions`;
+  }
+
+  return `${content.content_json.cards.length} cards`;
 }
 
 function SummaryViewer({ content }: { content: Extract<GeneratedContent["content_json"], { type: "summary" }> }) {

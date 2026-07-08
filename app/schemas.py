@@ -33,6 +33,7 @@ class ChatRequest(BaseModel):
     question: str = Field(min_length=1, max_length=2000)
     explanation_mode: Literal["simple", "university"] = "university"
     top_k: int = Field(default=5, ge=1, le=8)
+    session_id: int | None = None
 
 
 class CitationRead(BaseModel):
@@ -56,3 +57,26 @@ class GeneratedContentRead(BaseModel):
     type: str
     content_json: dict
     created_at: datetime
+
+
+class DashboardStatsRead(BaseModel):
+    subject_count: int
+    document_count: int
+    chat_session_count: int
+    generated_set_count: int
+
+
+class ChatMessageRead(BaseModel):
+    id: int
+    role: str
+    content: str
+    created_at: datetime
+    citations: list[CitationRead] = []
+
+
+class ChatSessionRead(BaseModel):
+    id: int
+    subject_id: int
+    created_at: datetime
+    title: str
+    messages: list[ChatMessageRead]
