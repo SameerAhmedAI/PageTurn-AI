@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.database import SessionLocal, STORAGE_DIR
 from app.models import Document
+from app.services.indexing import index_document_chunks
 
 
 def process_pdf_document(document_id: int) -> None:
@@ -26,12 +27,14 @@ def process_pdf_document(document_id: int) -> None:
 def _extract_pdf_text(db: Session, document: Document) -> None:
     pdf_path = Path(document.storage_path)
     pages: list[str] = []
+    page_texts: list[tuple[int, str]] = []
 
     try:
         with fitz.open(pdf_path) as pdf:
             for page_index, page in enumerate(pdf, start=1):
                 text = page.get_text("text").strip()
                 if text:
+                    page_texts.append((page_index, text))
                     pages.append(f"--- Page {page_index} ---\n{text}")
 
             document.page_count = pdf.page_count
@@ -46,6 +49,13 @@ def _extract_pdf_text(db: Session, document: Document) -> None:
         text_path.write_text(combined_text, encoding="utf-8")
 
         document.extracted_text_path = str(text_path)
+        document.upload_status = "chunking"
+        db.commit()
+
+        indexed_count = index_document_chunks(db, document, page_texts)
+        if indexed_count == 0:
+            raise ValueError("No chunks could be created from the extracted PDF text.")
+
         document.upload_status = "ready"
         document.error_message = None
     except Exception as exc:

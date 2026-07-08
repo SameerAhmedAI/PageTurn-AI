@@ -1,13 +1,17 @@
 from pathlib import Path
+import json
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile, status
+from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.database import STORAGE_DIR, get_db
-from app.models import Document, Subject
-from app.schemas import DocumentRead, SubjectCreate, SubjectRead
+from app.models import ChatMessage, ChatSession, Citation, Document, Subject
+from app.schemas import ChatRequest, CitationRead, DocumentRead, SubjectCreate, SubjectRead
+from app.services.indexing import retrieve_chunks
+from app.services.llm import generate_answer
 from app.services.pdf_processing import process_pdf_document
 
 
@@ -104,3 +108,114 @@ def list_documents(subject_id: int, db: Session = Depends(get_db)) -> list[Docum
         .order_by(Document.uploaded_at.desc())
     )
     return list(db.scalars(statement).all())
+
+
+@router.get("/document-files/{document_id}")
+def get_document_file(document_id: int, db: Session = Depends(get_db)) -> FileResponse:
+    document = db.get(Document, document_id)
+    if document is None:
+        raise HTTPException(status_code=404, detail="Document not found.")
+
+    pdf_path = Path(document.storage_path)
+    if not pdf_path.exists():
+        raise HTTPException(status_code=404, detail="Document file not found.")
+
+    return FileResponse(
+        pdf_path,
+        media_type="application/pdf",
+        filename=document.filename,
+    )
+
+
+@router.post("/{subject_id}/chat")
+def chat_with_subject(
+    subject_id: int,
+    payload: ChatRequest,
+    db: Session = Depends(get_db),
+) -> StreamingResponse:
+    subject = db.get(Subject, subject_id)
+    if subject is None:
+        raise HTTPException(status_code=404, detail="Subject not found.")
+
+    retrieved = retrieve_chunks(db, subject_id, payload.question, payload.top_k)
+    answer = generate_answer(payload.question, retrieved, payload.explanation_mode)
+    citations = [] if answer.lower().startswith("not found") else build_citations(retrieved)
+
+    session = ChatSession(subject_id=subject_id)
+    db.add(session)
+    db.flush()
+
+    user_message = ChatMessage(
+        session_id=session.id,
+        role="user",
+        content=payload.question,
+    )
+    assistant_message = ChatMessage(
+        session_id=session.id,
+        role="assistant",
+        content=answer,
+    )
+    db.add_all([user_message, assistant_message])
+    db.flush()
+
+    for citation in citations:
+        db.add(
+            Citation(
+                message_id=assistant_message.id,
+                document_id=citation.document_id,
+                page_number=citation.page_number,
+                chunk_text=citation.chunk_text,
+            )
+        )
+
+    db.commit()
+
+    return StreamingResponse(
+        stream_chat_response(answer, citations),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+def build_citations(retrieved_chunks) -> list[CitationRead]:
+    citations: list[CitationRead] = []
+    seen: set[tuple[int, int]] = set()
+
+    for item in retrieved_chunks:
+        if item.score < 0.02:
+            continue
+
+        chunk = item.chunk
+        key = (chunk.document_id, chunk.page_number)
+        if key in seen:
+            continue
+
+        seen.add(key)
+        citations.append(
+            CitationRead(
+                document_id=chunk.document_id,
+                filename=chunk.document.filename,
+                page_number=chunk.page_number,
+                chunk_text=chunk.content[:700],
+            )
+        )
+
+        if len(citations) >= 5:
+            break
+
+    return citations
+
+
+def stream_chat_response(answer: str, citations: list[CitationRead]):
+    for token in answer.split(" "):
+        yield sse_event("token", {"text": token + " "})
+
+    yield sse_event(
+        "citations",
+        {"citations": [citation.model_dump() for citation in citations]},
+    )
+    yield sse_event("done", {"ok": True})
+
+
+def sse_event(event: str, payload: dict) -> str:
+    return f"event: {event}\ndata: {json.dumps(payload)}\n\n"

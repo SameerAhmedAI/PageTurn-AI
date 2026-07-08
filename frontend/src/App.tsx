@@ -14,7 +14,9 @@ import {
   MessageSquare,
   Moon,
   Plus,
+  Quote,
   RefreshCw,
+  Send,
   Settings,
   Sun,
   Upload,
@@ -29,8 +31,12 @@ import {
   fetchDocuments,
   fetchHealth,
   fetchSubjects,
+  getDocumentFileUrl,
+  streamChatAnswer,
   uploadDocument,
+  type Citation,
   type DocumentRecord,
+  type ExplanationMode,
   type HealthResponse,
   type Subject,
 } from "./lib/api";
@@ -44,6 +50,13 @@ type HealthState = Loadable<HealthResponse>;
 type SubjectsState = Loadable<Subject[]>;
 type DocumentsState = Loadable<DocumentRecord[]>;
 
+type ChatTurn = {
+  id: number;
+  role: "user" | "assistant";
+  content: string;
+  citations?: Citation[];
+};
+
 const navItems = [
   { label: "Subjects", icon: Folder, active: true },
   { label: "Upload", icon: Upload },
@@ -56,6 +69,7 @@ const navItems = [
 const statusStyles = {
   processing: "bg-accent-soft text-accent",
   extracting: "bg-accent-soft text-accent",
+  chunking: "bg-accent-soft text-accent",
   ready: "bg-accent-soft text-accent",
   failed: "bg-red-50 text-error dark:bg-red-950/30",
 };
@@ -63,6 +77,7 @@ const statusStyles = {
 const statusIcons = {
   processing: Clock3,
   extracting: Loader2,
+  chunking: Loader2,
   ready: CheckCircle2,
   failed: AlertTriangle,
 };
@@ -548,7 +563,177 @@ function SubjectDetail({
           </div>
         </section>
       </div>
+
+      <ChatPanel subject={subject} />
     </motion.section>
+  );
+}
+
+function ChatPanel({ subject }: { subject: Subject }) {
+  const [question, setQuestion] = useState("");
+  const [mode, setMode] = useState<ExplanationMode>("university");
+  const [turns, setTurns] = useState<ChatTurn[]>([]);
+  const [isAnswering, setIsAnswering] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function handleAsk(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const nextQuestion = question.trim();
+    if (!nextQuestion || isAnswering) {
+      return;
+    }
+
+    const userTurn: ChatTurn = {
+      id: Date.now(),
+      role: "user",
+      content: nextQuestion,
+    };
+    const assistantTurn: ChatTurn = {
+      id: Date.now() + 1,
+      role: "assistant",
+      content: "",
+      citations: [],
+    };
+
+    setTurns((current) => [...current, userTurn, assistantTurn]);
+    setQuestion("");
+    setError(null);
+    setIsAnswering(true);
+
+    try {
+      await streamChatAnswer({
+        subjectId: subject.id,
+        question: nextQuestion,
+        explanationMode: mode,
+        onToken: (text) => {
+          setTurns((current) =>
+            current.map((turn) =>
+              turn.id === assistantTurn.id
+                ? { ...turn, content: turn.content + text }
+                : turn,
+            ),
+          );
+        },
+        onCitations: (citations) => {
+          setTurns((current) =>
+            current.map((turn) =>
+              turn.id === assistantTurn.id ? { ...turn, citations } : turn,
+            ),
+          );
+        },
+      });
+    } catch (caughtError) {
+      setError(getMessage(caughtError));
+      setTurns((current) =>
+        current.map((turn) =>
+          turn.id === assistantTurn.id
+            ? { ...turn, content: "The answer stream failed before a response completed." }
+            : turn,
+        ),
+      );
+    } finally {
+      setIsAnswering(false);
+    }
+  }
+
+  return (
+    <section className="rounded-lg border border-border bg-surface p-5">
+      <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+        <div className="flex items-center gap-3">
+          <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-accent-soft text-accent">
+            <MessageSquare aria-hidden="true" className="h-5 w-5" />
+          </div>
+          <div>
+            <h2 className="text-lg font-semibold text-text-primary">Chat With Notes</h2>
+            <p className="text-sm text-text-secondary">Answers stream with source citations.</p>
+          </div>
+        </div>
+        <div className="grid grid-cols-2 rounded-lg border border-border bg-surface-alt p-1">
+          {(["simple", "university"] as ExplanationMode[]).map((option) => (
+            <button
+              className={`h-8 rounded-md px-3 text-xs font-medium transition duration-150 ease-out ${
+                mode === option ? "bg-surface text-accent" : "text-text-secondary"
+              }`}
+              key={option}
+              onClick={() => setMode(option)}
+              type="button"
+            >
+              {option === "simple" ? "Simple" : "University"}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="mt-5 min-h-56 space-y-4 rounded-lg border border-border bg-surface-alt p-4">
+        {turns.length === 0 && (
+          <div className="flex h-44 items-center justify-center text-center">
+            <div>
+              <Quote aria-hidden="true" className="mx-auto h-6 w-6 text-accent" />
+              <p className="mt-3 text-sm font-medium text-text-primary">Ask from this subject</p>
+            </div>
+          </div>
+        )}
+
+        {turns.map((turn) => (
+          <div
+            className={`max-w-3xl rounded-lg border border-border p-4 ${
+              turn.role === "user" ? "ml-auto bg-surface" : "bg-bg"
+            }`}
+            key={turn.id}
+          >
+            <p className="text-xs font-medium uppercase text-text-secondary">
+              {turn.role === "user" ? "You" : "PageTurn"}
+            </p>
+            <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-text-primary">
+              {turn.content}
+              {isAnswering && turn.role === "assistant" && turn.content && (
+                <span className="ml-1 inline-block h-4 w-1 animate-pulse bg-accent align-middle" />
+              )}
+            </p>
+            {turn.citations && turn.citations.length > 0 && (
+              <div className="mt-4 flex flex-wrap gap-2">
+                {turn.citations.map((citation) => (
+                  <a
+                    className="inline-flex items-center gap-2 rounded-lg bg-accent-soft px-3 py-1.5 font-mono text-xs text-accent"
+                    href={getDocumentFileUrl(citation.document_id, citation.page_number)}
+                    key={`${citation.document_id}-${citation.page_number}`}
+                    rel="noreferrer"
+                    target="_blank"
+                    title={citation.chunk_text}
+                  >
+                    <Quote aria-hidden="true" className="h-3.5 w-3.5" />
+                    {citation.filename} · p.{citation.page_number}
+                  </a>
+                ))}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+
+      {error && <p className="mt-3 text-sm font-medium text-error">{error}</p>}
+
+      <form className="mt-4 flex flex-col gap-3 md:flex-row" onSubmit={handleAsk}>
+        <input
+          className="h-11 min-w-0 flex-1 rounded-lg border border-border bg-surface-alt px-3 text-sm text-text-primary outline-none transition duration-150 ease-out focus:border-accent"
+          onChange={(event) => setQuestion(event.target.value)}
+          placeholder="Ask a question from the uploaded PDFs"
+          value={question}
+        />
+        <button
+          className="flex h-11 items-center justify-center gap-2 rounded-lg bg-accent px-4 text-sm font-medium text-white transition duration-150 ease-out hover:-translate-y-px hover:bg-accent-hover hover:shadow-interactive disabled:cursor-not-allowed disabled:opacity-70"
+          disabled={isAnswering || !question.trim()}
+          type="submit"
+        >
+          {isAnswering ? (
+            <Loader2 aria-hidden="true" className="h-4 w-4 animate-spin" />
+          ) : (
+            <Send aria-hidden="true" className="h-4 w-4" />
+          )}
+          Ask
+        </button>
+      </form>
+    </section>
   );
 }
 
@@ -573,7 +758,11 @@ function DocumentRow({ document }: { document: DocumentRecord }) {
         >
           <Icon
             aria-hidden="true"
-            className={`h-3.5 w-3.5 ${document.upload_status === "extracting" ? "animate-spin" : ""}`}
+            className={`h-3.5 w-3.5 ${
+              document.upload_status === "extracting" || document.upload_status === "chunking"
+                ? "animate-spin"
+                : ""
+            }`}
           />
           {formatStatus(document.upload_status)}
         </span>

@@ -12,7 +12,7 @@ export type Subject = {
   document_count: number;
 };
 
-export type DocumentStatus = "processing" | "extracting" | "ready" | "failed";
+export type DocumentStatus = "processing" | "extracting" | "chunking" | "ready" | "failed";
 
 export type DocumentRecord = {
   id: number;
@@ -22,6 +22,15 @@ export type DocumentRecord = {
   page_count: number | null;
   error_message: string | null;
   uploaded_at: string;
+};
+
+export type ExplanationMode = "simple" | "university";
+
+export type Citation = {
+  document_id: number;
+  filename: string;
+  page_number: number;
+  chunk_text: string;
 };
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000";
@@ -61,6 +70,66 @@ export async function uploadDocument(
   });
 }
 
+export function getDocumentFileUrl(documentId: number, pageNumber: number): string {
+  return `${API_BASE_URL}/subjects/document-files/${documentId}#page=${pageNumber}`;
+}
+
+export async function streamChatAnswer({
+  subjectId,
+  question,
+  explanationMode,
+  onToken,
+  onCitations,
+}: {
+  subjectId: number;
+  question: string;
+  explanationMode: ExplanationMode;
+  onToken: (text: string) => void;
+  onCitations: (citations: Citation[]) => void;
+}): Promise<void> {
+  const response = await fetch(`${API_BASE_URL}/subjects/${subjectId}/chat`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      question,
+      explanation_mode: explanationMode,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(await getErrorMessage(response));
+  }
+
+  if (!response.body) {
+    throw new Error("The chat stream did not return a response body.");
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+
+    buffer += decoder.decode(value, { stream: true });
+    const events = buffer.split("\n\n");
+    buffer = events.pop() ?? "";
+
+    for (const eventBlock of events) {
+      handleSseEvent(eventBlock, onToken, onCitations);
+    }
+  }
+
+  if (buffer.trim()) {
+    handleSseEvent(buffer, onToken, onCitations);
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, init);
 
@@ -82,4 +151,28 @@ async function getErrorMessage(response: Response): Promise<string> {
   }
 
   return `Request failed with status ${response.status}`;
+}
+
+function handleSseEvent(
+  eventBlock: string,
+  onToken: (text: string) => void,
+  onCitations: (citations: Citation[]) => void,
+) {
+  const lines = eventBlock.split("\n");
+  const event = lines.find((line) => line.startsWith("event: "))?.slice(7);
+  const dataLine = lines.find((line) => line.startsWith("data: "));
+
+  if (!event || !dataLine) {
+    return;
+  }
+
+  const data = JSON.parse(dataLine.slice(6)) as { text?: string; citations?: Citation[] };
+
+  if (event === "token" && typeof data.text === "string") {
+    onToken(data.text);
+  }
+
+  if (event === "citations" && Array.isArray(data.citations)) {
+    onCitations(data.citations);
+  }
 }

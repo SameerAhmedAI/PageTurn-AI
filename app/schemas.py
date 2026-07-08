@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -26,3 +27,16 @@ class DocumentRead(BaseModel):
     page_count: int | None
     error_message: str | None
     uploaded_at: datetime
+
+
+class ChatRequest(BaseModel):
+    question: str = Field(min_length=1, max_length=2000)
+    explanation_mode: Literal["simple", "university"] = "university"
+    top_k: int = Field(default=5, ge=1, le=8)
+
+
+class CitationRead(BaseModel):
+    document_id: int
+    filename: str
+    page_number: int
+    chunk_text: str
