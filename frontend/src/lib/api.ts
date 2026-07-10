@@ -209,7 +209,7 @@ export async function streamChatAnswer({
   onCitations: (citations: Citation[]) => void;
   onSession?: (sessionId: number) => void;
 }): Promise<void> {
-  const response = await fetch(`${API_BASE_URL}/subjects/${subjectId}/chat`, {
+  const response = await fetchApi(`/subjects/${subjectId}/chat`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -254,7 +254,7 @@ export async function streamChatAnswer({
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE_URL}${path}`, init);
+  const response = await fetchApi(path, init);
 
   if (!response.ok) {
     throw new Error(await getErrorMessage(response));
@@ -263,17 +263,67 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-async function getErrorMessage(response: Response): Promise<string> {
+async function fetchApi(path: string, init?: RequestInit): Promise<Response> {
   try {
-    const data = (await response.json()) as { detail?: unknown };
-    if (typeof data.detail === "string") {
-      return data.detail;
+    return await fetch(`${API_BASE_URL}${path}`, init);
+  } catch (error) {
+    if (error instanceof Error && error.message === "Failed to fetch") {
+      throw new Error(
+        "The request failed before the backend response could be read. " +
+          "Check that the API is running and that CORS is returning error responses.",
+      );
+    }
+
+    throw error;
+  }
+}
+
+async function getErrorMessage(response: Response): Promise<string> {
+  const fallback = `Request failed with status ${response.status}`;
+
+  try {
+    const body = await response.text();
+    if (!body.trim()) {
+      return fallback;
+    }
+
+    try {
+      const data = JSON.parse(body) as { detail?: unknown; error?: unknown; message?: unknown };
+      if (typeof data.detail === "string") {
+        return data.detail;
+      }
+      if (typeof data.message === "string") {
+        return data.message;
+      }
+      if (typeof data.error === "string") {
+        return data.error;
+      }
+      if (Array.isArray(data.detail)) {
+        return data.detail
+          .map((item) => {
+            if (typeof item === "string") {
+              return item;
+            }
+            if (
+              item &&
+              typeof item === "object" &&
+              "msg" in item &&
+              typeof item.msg === "string"
+            ) {
+              return item.msg;
+            }
+            return JSON.stringify(item);
+          })
+          .join("; ");
+      }
+    } catch {
+      return body;
     }
   } catch {
     // Fall through to the status message when the backend does not return JSON.
   }
 
-  return `Request failed with status ${response.status}`;
+  return fallback;
 }
 
 function handleSseEvent(

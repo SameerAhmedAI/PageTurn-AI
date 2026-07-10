@@ -14,7 +14,7 @@ class Chunk(Base):
     chunk_index: Mapped[int] = mapped_column(Integer)
     content: Mapped[str] = mapped_column(Text)
     embedding_json: Mapped[str] = mapped_column(Text)
-    embedding_model: Mapped[str] = mapped_column(default="local-hash-v1")
+    embedding_model: Mapped[str] = mapped_column(default="sentence-transformers/all-MiniLM-L6-v2")
 
     document: Mapped["Document"] = relationship()
     subject: Mapped["Subject"] = relationship()

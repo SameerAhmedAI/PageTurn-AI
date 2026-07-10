@@ -1,5 +1,10 @@
-from fastapi import FastAPI
+from dotenv import load_dotenv
+
+load_dotenv()
+
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.database import init_db
 from app.routers import health, subjects
@@ -23,6 +28,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(RuntimeError)
+def runtime_error_handler(_request: Request, exc: RuntimeError) -> JSONResponse:
+    return JSONResponse(status_code=500, content={"detail": str(exc)})
 
 
 @app.on_event("startup")

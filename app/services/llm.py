@@ -1,35 +1,13 @@
+import logging
 import os
-import re
+import time
 
 import httpx
 
 from app.services.indexing import RetrievedChunk
 
 
-STOPWORDS = {
-    "a",
-    "an",
-    "and",
-    "are",
-    "as",
-    "from",
-    "can",
-    "has",
-    "in",
-    "is",
-    "of",
-    "on",
-    "or",
-    "the",
-    "to",
-    "what",
-    "when",
-    "where",
-    "which",
-    "who",
-    "why",
-}
-TOKEN_RE = re.compile(r"[a-zA-Z0-9_]+")
+logger = logging.getLogger(__name__)
 
 
 def generate_answer(
@@ -41,11 +19,13 @@ def generate_answer(
         return "Not found in the provided material."
 
     prompt = build_prompt(question, retrieved_chunks, explanation_mode)
-    answer = try_ollama(prompt) or try_groq(prompt) or build_extractive_answer(
-        question,
-        retrieved_chunks,
-        explanation_mode,
-    )
+    answer = try_ollama(prompt) or try_groq(prompt)
+    if not answer:
+        raise RuntimeError(
+            "Chat answer generation failed: no LLM provider returned a response. "
+            "Start Ollama or set GROQ_API_KEY; extractive fallback is disabled."
+        )
+
     return answer.strip()
 
 
@@ -80,7 +60,7 @@ Context:
 
 def try_ollama(prompt: str) -> str | None:
     host = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
-    model = os.getenv("OLLAMA_LLM_MODEL", "llama3.1:8b")
+    model = os.getenv("OLLAMA_MODEL", "qwen2.5:1.5b")
 
     try:
         response = httpx.post(
@@ -92,84 +72,48 @@ def try_ollama(prompt: str) -> str | None:
         data = response.json()
         generated = data.get("response")
         return generated if isinstance(generated, str) and generated.strip() else None
-    except Exception:
+    except Exception as exc:
+        logger.warning("Ollama LLM request failed: %s: %s", type(exc).__name__, exc)
         return None
 
 
 def try_groq(prompt: str) -> str | None:
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
+        logger.warning("Groq LLM request skipped: GROQ_API_KEY is missing or empty.")
         return None
 
     model = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
-    try:
-        response = httpx.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}"},
-            json={
-                "model": model,
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.1,
-            },
-            timeout=25,
-        )
-        response.raise_for_status()
-        data = response.json()
-        generated = data["choices"][0]["message"]["content"]
-        return generated if isinstance(generated, str) and generated.strip() else None
-    except Exception:
-        return None
+    for attempt in range(2):
+        try:
+            response = httpx.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}"},
+                json={
+                    "model": model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.1,
+                },
+                timeout=90,
+            )
+            response.raise_for_status()
+            data = response.json()
+            generated = data["choices"][0]["message"]["content"]
+            return generated if isinstance(generated, str) and generated.strip() else None
+        except httpx.ConnectError as exc:
+            if attempt == 0:
+                logger.warning(
+                    "Groq LLM request connection failed; retrying once: %s: %s",
+                    type(exc).__name__,
+                    exc,
+                )
+                time.sleep(1)
+                continue
 
+            logger.warning("Groq LLM request failed: %s: %s", type(exc).__name__, exc)
+            return None
+        except Exception as exc:
+            logger.warning("Groq LLM request failed: %s: %s", type(exc).__name__, exc)
+            return None
 
-def build_extractive_answer(
-    question: str,
-    retrieved_chunks: list[RetrievedChunk],
-    explanation_mode: str,
-) -> str:
-    question_terms = {
-        token
-        for token in TOKEN_RE.findall(question.lower())
-        if token not in STOPWORDS and len(token) > 2
-    }
-    scored_statements: list[tuple[int, str]] = []
-
-    for item in retrieved_chunks:
-        statements = split_statements(item.chunk.content)
-        for statement in statements:
-            normalized = statement.lower()
-            score = sum(1 for term in question_terms if term in normalized)
-            if score > 0:
-                scored_statements.append((score, statement))
-
-    scored_statements.sort(key=lambda item: item[0], reverse=True)
-    selected_lines = []
-    seen = set()
-    minimum_score = 2 if scored_statements and scored_statements[0][0] >= 2 else 1
-    for score, statement in scored_statements:
-        if score < minimum_score:
-            continue
-        if statement in seen:
-            continue
-        seen.add(statement)
-        selected_lines.append(statement)
-        if len(selected_lines) >= 5:
-            break
-
-    if not selected_lines:
-        if retrieved_chunks[0].score < 0.12:
-            return "Not found in the provided material."
-        selected_lines = [retrieved_chunks[0].chunk.content[:700].strip()]
-
-    prefix = (
-        "From the retrieved material:"
-        if explanation_mode == "university"
-        else "The notes say:"
-    )
-    bullets = "\n".join(f"- {line}" for line in selected_lines if line)
-    return f"{prefix}\n{bullets}"
-
-
-def split_statements(text: str) -> list[str]:
-    text = re.sub(r"\s+", " ", text).strip()
-    parts = re.split(r"(?<=\.)\s+|(?=%\s+)", text)
-    return [part.strip() for part in parts if part.strip()]
+    return None

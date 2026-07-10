@@ -1,31 +1,29 @@
-import hashlib
-import math
-import re
+from functools import lru_cache
+
+from sentence_transformers import SentenceTransformer
 
 
-EMBEDDING_DIMENSIONS = 256
-EMBEDDING_MODEL = "local-hash-v1"
-TOKEN_RE = re.compile(r"[a-zA-Z0-9_]+")
+EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+MODEL_NAME = "all-MiniLM-L6-v2"
+
+
+@lru_cache(maxsize=1)
+def get_embedding_model() -> SentenceTransformer:
+    return SentenceTransformer(MODEL_NAME, local_files_only=True)
 
 
 def embed_text(text: str) -> list[float]:
-    vector = [0.0] * EMBEDDING_DIMENSIONS
-
-    for token in TOKEN_RE.findall(text.lower()):
-        digest = hashlib.blake2b(token.encode("utf-8"), digest_size=8).digest()
-        index = int.from_bytes(digest[:4], "big") % EMBEDDING_DIMENSIONS
-        sign = 1.0 if digest[4] % 2 == 0 else -1.0
-        vector[index] += sign
-
-    norm = math.sqrt(sum(value * value for value in vector))
-    if norm == 0:
-        return vector
-
-    return [value / norm for value in vector]
+    return embed_texts([text])[0]
 
 
-def cosine_similarity(left: list[float], right: list[float]) -> float:
-    if not left or not right or len(left) != len(right):
-        return 0.0
+def embed_texts(texts: list[str]) -> list[list[float]]:
+    if not texts:
+        return []
 
-    return sum(a * b for a, b in zip(left, right))
+    embeddings = get_embedding_model().encode(
+        texts,
+        convert_to_numpy=True,
+        normalize_embeddings=True,
+        show_progress_bar=False,
+    )
+    return embeddings.astype(float).tolist()
