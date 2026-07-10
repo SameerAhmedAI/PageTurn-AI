@@ -8,6 +8,10 @@ class SubjectCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
 
 
+class SubjectUpdate(BaseModel):
+    name: str = Field(max_length=120)
+
+
 class SubjectRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

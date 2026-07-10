@@ -1,14 +1,16 @@
-from pathlib import Path
 import json
+import logging
+from pathlib import Path
+import shutil
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile, Response, status
 from fastapi.responses import FileResponse, StreamingResponse
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.database import STORAGE_DIR, get_db
-from app.models import ChatMessage, ChatSession, Citation, Document, GeneratedContent, Subject
+from app.models import ChatMessage, ChatSession, Chunk, Citation, Document, GeneratedContent, Subject
 from app.schemas import (
     ChatRequest,
     ChatMessageRead,
@@ -20,15 +22,17 @@ from app.schemas import (
     GenerateRequest,
     SubjectCreate,
     SubjectRead,
+    SubjectUpdate,
 )
 from app.services.export import generated_content_to_markdown, generated_content_to_pdf_bytes
 from app.services.generation import generate_study_content
-from app.services.indexing import retrieve_chunks
+from app.services.indexing import delete_document_vectors, delete_subject_collection, retrieve_chunks
 from app.services.llm import generate_answer
 from app.services.pdf_processing import process_pdf_document
 
 
 router = APIRouter(prefix="/subjects", tags=["subjects"])
+logger = logging.getLogger(__name__)
 
 
 @router.get("/dashboard/stats", response_model=DashboardStatsRead)
@@ -78,6 +82,76 @@ def list_subjects(db: Session = Depends(get_db)) -> list[SubjectRead]:
         )
 
     return subjects
+
+
+@router.patch("/{subject_id}", response_model=SubjectRead)
+def update_subject(
+    subject_id: int,
+    payload: SubjectUpdate,
+    db: Session = Depends(get_db),
+) -> SubjectRead:
+    subject = db.get(Subject, subject_id)
+    if subject is None:
+        raise HTTPException(status_code=404, detail="Subject not found.")
+
+    name = " ".join(payload.name.strip().split())
+    if not name:
+        raise HTTPException(status_code=400, detail="Subject name is required.")
+
+    subject.name = name
+
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="A subject with this name already exists.") from exc
+
+    db.refresh(subject)
+    document_count = int(
+        db.scalar(select(func.count(Document.id)).where(Document.subject_id == subject_id)) or 0
+    )
+    return SubjectRead.model_validate(subject).model_copy(update={"document_count": document_count})
+
+
+@router.delete("/{subject_id}")
+def delete_subject(subject_id: int, db: Session = Depends(get_db)) -> dict[str, str]:
+    subject = db.get(Subject, subject_id)
+    if subject is None:
+        raise HTTPException(status_code=404, detail="Subject not found.")
+
+    document_ids = select(Document.id).where(Document.subject_id == subject_id)
+    session_ids = select(ChatSession.id).where(ChatSession.subject_id == subject_id)
+    message_ids = select(ChatMessage.id).where(ChatMessage.session_id.in_(session_ids))
+    subject_dir = STORAGE_DIR / str(subject_id)
+
+    try:
+        delete_subject_collection(subject_id)
+        delete_storage_tree(subject_dir)
+
+        db.execute(
+            delete(Citation).where(
+                or_(
+                    Citation.message_id.in_(message_ids),
+                    Citation.document_id.in_(document_ids),
+                )
+            )
+        )
+        db.execute(delete(ChatMessage).where(ChatMessage.session_id.in_(session_ids)))
+        db.execute(delete(ChatSession).where(ChatSession.subject_id == subject_id))
+        db.execute(delete(GeneratedContent).where(GeneratedContent.subject_id == subject_id))
+        db.execute(delete(Chunk).where(Chunk.subject_id == subject_id))
+        db.execute(delete(Document).where(Document.subject_id == subject_id))
+        db.execute(delete(Subject).where(Subject.id == subject_id))
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        logger.exception(
+            "Failed to delete subject %s. Partial disk or Chroma cleanup may have already occurred.",
+            subject_id,
+        )
+        raise HTTPException(status_code=500, detail=f"Failed to delete subject: {exc}") from exc
+
+    return {"detail": f"Subject {subject_id} deleted successfully."}
 
 
 @router.post("/{subject_id}/documents", response_model=DocumentRead, status_code=status.HTTP_201_CREATED)
@@ -133,6 +207,39 @@ def list_documents(subject_id: int, db: Session = Depends(get_db)) -> list[Docum
     return list(db.scalars(statement).all())
 
 
+@router.delete("/{subject_id}/documents/{document_id}")
+def delete_document(
+    subject_id: int,
+    document_id: int,
+    db: Session = Depends(get_db),
+) -> dict[str, str]:
+    document = db.get(Document, document_id)
+    if document is None or document.subject_id != subject_id:
+        raise HTTPException(status_code=404, detail="Document not found.")
+
+    file_paths = [document.storage_path, document.extracted_text_path]
+
+    try:
+        delete_document_vectors(subject_id, document_id)
+        for file_path in file_paths:
+            delete_storage_file(file_path)
+
+        db.execute(delete(Citation).where(Citation.document_id == document_id))
+        db.execute(delete(Chunk).where(Chunk.document_id == document_id))
+        db.execute(delete(Document).where(Document.id == document_id))
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        logger.exception(
+            "Failed to delete document %s for subject %s. Partial disk or Chroma cleanup may have already occurred.",
+            document_id,
+            subject_id,
+        )
+        raise HTTPException(status_code=500, detail=f"Failed to delete document: {exc}") from exc
+
+    return {"detail": f"Document {document_id} deleted successfully."}
+
+
 @router.get("/{subject_id}/generated", response_model=list[GeneratedContentRead])
 def list_generated_content(
     subject_id: int,
@@ -146,6 +253,41 @@ def list_generated_content(
         select(GeneratedContent)
         .where(GeneratedContent.subject_id == subject_id)
         .order_by(GeneratedContent.created_at.desc(), GeneratedContent.id.desc())
+    )
+
+    return [
+        GeneratedContentRead(
+            id=content.id,
+            subject_id=content.subject_id,
+            type=content.type,
+            content_json=json.loads(content.content_json),
+            created_at=content.created_at,
+        )
+        for content in db.scalars(statement).all()
+    ]
+
+
+@router.delete("/{subject_id}/generated/{content_id}")
+def delete_generated_content(
+    subject_id: int,
+    content_id: int,
+    db: Session = Depends(get_db),
+) -> dict[str, str]:
+    content = db.get(GeneratedContent, content_id)
+    if content is None or content.subject_id != subject_id:
+        raise HTTPException(status_code=404, detail="Generated content not found.")
+
+    db.delete(content)
+    db.commit()
+
+    return {"detail": f"Generated content {content_id} deleted successfully."}
+
+
+@router.get("/generated/all", response_model=list[GeneratedContentRead])
+def list_all_generated_content(db: Session = Depends(get_db)) -> list[GeneratedContentRead]:
+    statement = select(GeneratedContent).order_by(
+        GeneratedContent.created_at.desc(),
+        GeneratedContent.id.desc(),
     )
 
     return [
@@ -347,6 +489,27 @@ def build_citations(retrieved_chunks) -> list[CitationRead]:
             break
 
     return citations
+
+
+def delete_storage_tree(path: Path) -> None:
+    if path.exists():
+        shutil.rmtree(path)
+
+
+def delete_storage_file(path_value: str | None) -> None:
+    if not path_value:
+        return
+
+    path = Path(path_value)
+    if not path.exists():
+        return
+
+    storage_root = STORAGE_DIR.resolve()
+    resolved_path = path.resolve()
+    if storage_root != resolved_path and storage_root not in resolved_path.parents:
+        raise ValueError(f"Refusing to delete file outside storage directory: {path}")
+
+    path.unlink()
 
 
 def build_chat_session_read(db: Session, session: ChatSession) -> ChatSessionRead:

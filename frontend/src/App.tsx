@@ -3,7 +3,9 @@ import type { RefObject } from "react";
 import {
   AlertTriangle,
   ArrowLeft,
+  ArrowRight,
   BarChart3,
+  ChevronDown,
   CheckCircle2,
   Clock3,
   Download,
@@ -16,12 +18,14 @@ import {
   ListChecks,
   MessageSquare,
   Moon,
+  Pencil,
   Plus,
   Quote,
   RefreshCw,
   Send,
   Settings,
   Sun,
+  Trash2,
   Upload,
   X,
 } from "lucide-react";
@@ -31,17 +35,23 @@ import { AnimatePresence, motion } from "framer-motion";
 import { Logo } from "./components/Logo";
 import {
   createSubject,
+  deleteDocument,
+  deleteGeneratedContent,
+  deleteSubject,
+  fetchAllGeneratedContent,
   fetchChatHistory,
   fetchDashboardStats,
   fetchDocuments,
   fetchGeneratedContent,
   fetchHealth,
+  fetchLlmConfig,
   fetchSubjects,
   generateStudyContent,
   getDocumentFileUrl,
   getGeneratedExportUrl,
   streamChatAnswer,
   uploadDocument,
+  updateSubject,
   type ChatHistorySession,
   type Citation,
   type DashboardStats,
@@ -50,6 +60,7 @@ import {
   type GeneratedContent,
   type GenerationType,
   type HealthResponse,
+  type LlmConfig,
   type Subject,
 } from "./lib/api";
 
@@ -64,6 +75,16 @@ type DocumentsState = Loadable<DocumentRecord[]>;
 type DashboardStatsState = Loadable<DashboardStats>;
 type ChatHistoryState = Loadable<ChatHistorySession[]>;
 type GeneratedContentState = Loadable<GeneratedContent[]>;
+type LlmConfigState = Loadable<LlmConfig>;
+type AppView = "subjects" | "upload" | "chat" | "studySets" | "examPrep" | "settings";
+type DeleteConfirmation =
+  | { kind: "subject"; subject: Subject }
+  | { kind: "document"; document: DocumentRecord }
+  | {
+      kind: "generated";
+      content: GeneratedContent;
+      onDeleted?: (content: GeneratedContent) => void;
+    };
 
 type ChatTurn = {
   id: number;
@@ -72,13 +93,22 @@ type ChatTurn = {
   citations?: Citation[];
 };
 
-const navItems = [
-  { label: "Subjects", icon: Folder, active: true },
-  { label: "Upload", icon: Upload },
-  { label: "Chat", icon: MessageSquare },
-  { label: "Study Sets", icon: Layers },
-  { label: "Exam Prep", icon: GraduationCap },
-  { label: "Settings", icon: Settings },
+type StudySetCategoryFilter = GenerationType | "all";
+
+const navItems: Array<{ id: AppView; label: string; icon: LucideIcon }> = [
+  { id: "subjects", label: "Subjects", icon: Folder },
+  { id: "upload", label: "Upload", icon: Upload },
+  { id: "chat", label: "Chat", icon: MessageSquare },
+  { id: "studySets", label: "Study Sets", icon: Layers },
+  { id: "examPrep", label: "Exam Prep", icon: GraduationCap },
+  { id: "settings", label: "Settings", icon: Settings },
+];
+
+const studySetCategoryOptions: Array<{ value: StudySetCategoryFilter; label: string }> = [
+  { value: "all", label: "All" },
+  { value: "summary", label: "Summary" },
+  { value: "mcq", label: "MCQs" },
+  { value: "flashcard", label: "Flashcards" },
 ];
 
 const statusStyles = {
@@ -97,11 +127,17 @@ const statusIcons = {
   failed: AlertTriangle,
 };
 
+const sidebarListScrollClass =
+  "mt-3 max-h-80 space-y-2 overflow-y-auto pr-1 [scrollbar-color:var(--color-border)_transparent] [scrollbar-width:thin] [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-border [&::-webkit-scrollbar-track]:bg-transparent";
+
 export default function App() {
   const [theme, setTheme] = useState<"light" | "dark">(() => getInitialTheme());
+  const [activeView, setActiveView] = useState<AppView>("subjects");
   const [health, setHealth] = useState<HealthState>({ status: "loading" });
   const [subjects, setSubjects] = useState<SubjectsState>({ status: "loading" });
   const [dashboardStats, setDashboardStats] = useState<DashboardStatsState>({ status: "loading" });
+  const [allGeneratedSets, setAllGeneratedSets] = useState<GeneratedContentState>({ status: "loading" });
+  const [llmConfig, setLlmConfig] = useState<LlmConfigState>({ status: "loading" });
   const [selectedSubjectId, setSelectedSubjectId] = useState<number | null>(null);
   const [documents, setDocuments] = useState<DocumentsState>({ status: "ready", data: [] });
   const [isSubjectModalOpen, setIsSubjectModalOpen] = useState(false);
@@ -110,6 +146,12 @@ export default function App() {
   const [isCreatingSubject, setIsCreatingSubject] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [isUploading, setIsUploading] = useState(false);
+  const [isStudyGenerating, setIsStudyGenerating] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [deletingSubjectId, setDeletingSubjectId] = useState<number | null>(null);
+  const [documentDeleteError, setDocumentDeleteError] = useState<string | null>(null);
+  const [deletingDocumentId, setDeletingDocumentId] = useState<number | null>(null);
+  const [deleteConfirmation, setDeleteConfirmation] = useState<DeleteConfirmation | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const selectedSubject = useMemo(() => {
@@ -121,10 +163,13 @@ export default function App() {
   }, [selectedSubjectId, subjects]);
 
   useEffect(() => {
-    document.title = selectedSubject
-      ? `PageTurn \u2014 ${selectedSubject.name}`
-      : "PageTurn \u2014 Subjects";
-  }, [selectedSubject]);
+    if (activeView === "subjects" && selectedSubject) {
+      document.title = `PageTurn \u2014 ${selectedSubject.name}`;
+      return;
+    }
+
+    document.title = `PageTurn \u2014 ${getViewLabel(activeView)}`;
+  }, [activeView, selectedSubject]);
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", theme === "dark");
@@ -148,11 +193,22 @@ export default function App() {
 
     loadSubjects();
     loadDashboardStats();
+    loadAllGeneratedSets();
+    loadLlmConfig();
 
     return () => {
       isMounted = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (activeView === "studySets") {
+      loadAllGeneratedSets();
+    }
+    if (activeView === "settings") {
+      loadLlmConfig();
+    }
+  }, [activeView]);
 
   useEffect(() => {
     if (selectedSubjectId === null) {
@@ -233,6 +289,34 @@ export default function App() {
       );
   }
 
+  function loadAllGeneratedSets() {
+    setAllGeneratedSets({ status: "loading" });
+    fetchAllGeneratedContent()
+      .then((data) => setAllGeneratedSets({ status: "ready", data }))
+      .catch((error: unknown) =>
+        setAllGeneratedSets({ status: "error", message: getMessage(error) }),
+      );
+  }
+
+  function loadLlmConfig() {
+    setLlmConfig({ status: "loading" });
+    fetchLlmConfig()
+      .then((data) => setLlmConfig({ status: "ready", data }))
+      .catch((error: unknown) => setLlmConfig({ status: "error", message: getMessage(error) }));
+  }
+
+  function handleNav(view: AppView) {
+    setActiveView(view);
+    if (view === "subjects") {
+      setSelectedSubjectId(null);
+    }
+  }
+
+  function openSubject(subjectId: number) {
+    setSelectedSubjectId(subjectId);
+    setActiveView("subjects");
+  }
+
   async function handleCreateSubject(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setSubjectError(null);
@@ -290,23 +374,151 @@ export default function App() {
     }
   }
 
+  function handleDeleteSubject(subject: Subject) {
+    setDeleteConfirmation({ kind: "subject", subject });
+  }
+
+  async function handleRenameSubject(subjectId: number, name: string): Promise<void> {
+    const updatedSubject = await updateSubject(subjectId, name);
+    setSubjects((current) => {
+      if (current.status !== "ready") {
+        return current;
+      }
+
+      return {
+        status: "ready",
+        data: current.data.map((subject) =>
+          subject.id === updatedSubject.id ? updatedSubject : subject,
+        ),
+      };
+    });
+  }
+
+  async function performDeleteSubject(subject: Subject) {
+    setDeleteError(null);
+    setDeletingSubjectId(subject.id);
+
+    try {
+      await deleteSubject(subject.id);
+      setSubjects((current) => {
+        if (current.status !== "ready") {
+          return current;
+        }
+        return {
+          status: "ready",
+          data: current.data.filter((item) => item.id !== subject.id),
+        };
+      });
+      if (selectedSubjectId === subject.id) {
+        setSelectedSubjectId(null);
+        setDocuments({ status: "ready", data: [] });
+      }
+      loadDashboardStats();
+    } catch (error) {
+      setDeleteError(getMessage(error));
+    } finally {
+      setDeletingSubjectId(null);
+    }
+  }
+
+  function handleDeleteDocument(document: DocumentRecord) {
+    setDeleteConfirmation({ kind: "document", document });
+  }
+
+  function handleDeleteGeneratedContent(
+    content: GeneratedContent,
+    onDeleted?: (content: GeneratedContent) => void,
+  ) {
+    setDeleteConfirmation({ kind: "generated", content, onDeleted });
+  }
+
+  async function performDeleteDocument(document: DocumentRecord) {
+    setDocumentDeleteError(null);
+    setDeletingDocumentId(document.id);
+
+    try {
+      await deleteDocument(document.subject_id, document.id);
+      setDocuments((current) => {
+        if (current.status !== "ready") {
+          return current;
+        }
+        return {
+          status: "ready",
+          data: current.data.filter((item) => item.id !== document.id),
+        };
+      });
+      void fetchSubjects().then((data) => setSubjects({ status: "ready", data }));
+      loadDashboardStats();
+    } catch (error) {
+      setDocumentDeleteError(getMessage(error));
+    } finally {
+      setDeletingDocumentId(null);
+    }
+  }
+
+  async function performDeleteGeneratedContent(
+    content: GeneratedContent,
+    onDeleted?: (content: GeneratedContent) => void,
+  ) {
+    await deleteGeneratedContent(content.subject_id, content.id);
+    setAllGeneratedSets((current) => {
+      if (current.status !== "ready") {
+        return current;
+      }
+
+      return {
+        status: "ready",
+        data: current.data.filter((item) => item.id !== content.id),
+      };
+    });
+    onDeleted?.(content);
+    loadDashboardStats();
+  }
+
+  async function confirmDelete() {
+    const pendingDelete = deleteConfirmation;
+    setDeleteConfirmation(null);
+
+    if (!pendingDelete) {
+      return;
+    }
+
+    if (pendingDelete.kind === "subject") {
+      await performDeleteSubject(pendingDelete.subject);
+      return;
+    }
+
+    if (pendingDelete.kind === "generated") {
+      await performDeleteGeneratedContent(pendingDelete.content, pendingDelete.onDeleted);
+      return;
+    }
+
+    await performDeleteDocument(pendingDelete.document);
+  }
+
+  const hasProcessingDocuments =
+    documents.status === "ready" &&
+    documents.data.some((document) => !isTerminalStatus(document.upload_status));
+  const isBackgroundActionActive = isUploading || hasProcessingDocuments || isStudyGenerating;
   const healthCopy = health.status === "ready" ? "API online" : "API check";
 
   return (
     <div className="min-h-screen bg-bg text-text-primary">
+      <TopProgressBar active={isBackgroundActionActive} />
       <div className="flex min-h-screen">
         <aside className="hidden w-72 shrink-0 border-r border-border bg-surface px-4 py-6 lg:block">
           <Logo />
           <nav className="mt-8 space-y-1">
             {navItems.map((item) => (
               <button
-                aria-current={item.active ? "page" : undefined}
+                aria-current={activeView === item.id ? "page" : undefined}
                 key={item.label}
                 className={`group flex h-11 w-full items-center gap-3 rounded-lg px-3 text-left text-sm font-medium transition duration-150 ease-out hover:-translate-y-px hover:shadow-interactive ${
-                  item.active
+                  activeView === item.id
                     ? "bg-accent-soft text-accent"
                     : "text-text-secondary hover:bg-surface-alt hover:text-text-primary"
                 }`}
+                onClick={() => handleNav(item.id)}
                 type="button"
               >
                 <item.icon aria-hidden="true" className="h-4 w-4" />
@@ -323,9 +535,9 @@ export default function App() {
             </div>
             <div className="hidden lg:block">
               <p className="text-sm font-medium text-text-primary">
-                {selectedSubject?.name ?? "Subjects"}
+                {activeView === "subjects" && selectedSubject ? selectedSubject.name : getViewLabel(activeView)}
               </p>
-              <p className="text-xs text-text-secondary">Phase 2 upload workflow</p>
+              <p className="text-xs text-text-secondary">PageTurn AI workspace</p>
             </div>
             <div className="flex items-center gap-3">
               <div className="hidden items-center gap-2 rounded-lg border border-border bg-surface-alt px-3 py-2 text-xs font-medium text-text-secondary sm:flex">
@@ -333,24 +545,11 @@ export default function App() {
                   {healthCopy}
                 </span>
               </div>
-              <button
-                aria-label="Toggle dark mode"
-                aria-pressed={theme === "dark"}
-                className="flex h-10 w-10 items-center justify-center rounded-lg border border-border bg-surface text-text-secondary transition duration-150 ease-out hover:-translate-y-px hover:text-text-primary hover:shadow-interactive"
-                type="button"
-                onClick={() => setTheme((current) => (current === "light" ? "dark" : "light"))}
-              >
-                {theme === "light" ? (
-                  <Moon aria-hidden="true" className="h-4 w-4" />
-                ) : (
-                  <Sun aria-hidden="true" className="h-4 w-4" />
-                )}
-              </button>
             </div>
           </header>
 
           <AnimatePresence mode="wait">
-            {selectedSubject ? (
+            {activeView === "subjects" && selectedSubject ? (
               <SubjectDetail
                 documents={documents}
                 isUploading={isUploading}
@@ -367,12 +566,18 @@ export default function App() {
                       setDocuments({ status: "error", message: getMessage(error) }),
                     );
                 }}
+                onDeleteDocument={handleDeleteDocument}
+                onDeleteGenerated={handleDeleteGeneratedContent}
+                onRenameSubject={handleRenameSubject}
                 onUpload={handleUpload}
                 refInput={fileInputRef}
                 subject={selectedSubject}
+                deleteError={documentDeleteError}
+                deletingDocumentId={deletingDocumentId}
+                onStudyGenerationChange={setIsStudyGenerating}
                 uploadError={uploadError}
               />
-            ) : (
+            ) : activeView === "subjects" ? (
               <SubjectsDashboard
                 key="subjects-dashboard"
                 onCreate={() => setIsSubjectModalOpen(true)}
@@ -380,9 +585,59 @@ export default function App() {
                   loadSubjects();
                   loadDashboardStats();
                 }}
-                onSelect={setSelectedSubjectId}
+                deleteError={deleteError}
+                deletingSubjectId={deletingSubjectId}
+                onDelete={handleDeleteSubject}
+                onRename={handleRenameSubject}
+                onSelect={openSubject}
                 stats={dashboardStats}
                 subjects={subjects}
+              />
+            ) : activeView === "upload" ? (
+              <SubjectPickerPage
+                actionLabel="Upload documents"
+                description="Upload is subject-scoped. Pick a subject first, then use its upload panel."
+                emptyMessage="Create a subject before uploading documents."
+                icon={Upload}
+                key="upload-page"
+                onSelect={openSubject}
+                onSubjects={() => handleNav("subjects")}
+                subjects={subjects}
+                title="Select a subject to upload documents"
+              />
+            ) : activeView === "chat" ? (
+              <SubjectPickerPage
+                actionLabel="Open chat"
+                description="Chat is grounded in one subject's indexed documents. Pick a subject to continue."
+                emptyMessage="Create a subject before chatting with notes."
+                icon={MessageSquare}
+                key="chat-page"
+                onSelect={openSubject}
+                onSubjects={() => handleNav("subjects")}
+                subjects={subjects}
+                title="Select a subject to chat"
+              />
+            ) : activeView === "studySets" ? (
+              <StudySetsOverview
+                generatedSets={allGeneratedSets}
+                key="study-sets-page"
+                onDeleteGenerated={handleDeleteGeneratedContent}
+                onRefresh={loadAllGeneratedSets}
+                onSelectSubject={openSubject}
+                onSubjects={() => handleNav("subjects")}
+                subjects={subjects}
+              />
+            ) : activeView === "examPrep" ? (
+              <ComingSoonPage key="exam-prep-page" onSubjects={() => handleNav("subjects")} />
+            ) : (
+              <SettingsPage
+                key="settings-page"
+                llmConfig={llmConfig}
+                onRefresh={loadLlmConfig}
+                onToggleTheme={() =>
+                  setTheme((current) => (current === "light" ? "dark" : "light"))
+                }
+                theme={theme}
               />
             )}
           </AnimatePresence>
@@ -404,19 +659,190 @@ export default function App() {
           />
         )}
       </AnimatePresence>
+
+      <AnimatePresence>
+        {deleteConfirmation && (
+          <ConfirmDialog
+            cancelLabel="Cancel"
+            confirmLabel="Delete"
+            isDangerous
+            message={getDeleteConfirmationMessage(deleteConfirmation)}
+            onCancel={() => setDeleteConfirmation(null)}
+            onConfirm={confirmDelete}
+            title={getDeleteConfirmationTitle(deleteConfirmation)}
+          />
+        )}
+      </AnimatePresence>
     </div>
   );
 }
 
+function TopProgressBar({ active }: { active: boolean }) {
+  return (
+    <AnimatePresence>
+      {active && (
+        <motion.div
+          animate={{ opacity: 1, scaleX: 0.92 }}
+          className="fixed inset-x-0 top-0 z-[60] h-0.5 origin-left bg-accent"
+          exit={{
+            opacity: 0,
+            scaleX: 1,
+            transition: { duration: 0.18, ease: "easeOut" },
+          }}
+          initial={{ opacity: 1, scaleX: 0 }}
+          style={{ boxShadow: "0 0 8px var(--color-accent)" }}
+          transition={{ duration: 1.2, ease: "easeOut" }}
+        />
+      )}
+    </AnimatePresence>
+  );
+}
+
+function ConfirmDialog({
+  cancelLabel,
+  confirmLabel,
+  isDangerous,
+  message,
+  onCancel,
+  onConfirm,
+  title,
+}: {
+  title: string;
+  message: string;
+  confirmLabel: string;
+  cancelLabel: string;
+  onConfirm: () => void;
+  onCancel: () => void;
+  isDangerous: boolean;
+}) {
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        onCancel();
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onCancel]);
+
+  return (
+    <motion.div
+      animate={{ opacity: 1 }}
+      aria-modal="true"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4"
+      exit={{ opacity: 0 }}
+      initial={{ opacity: 0 }}
+      onMouseDown={onCancel}
+      role="dialog"
+      transition={{ duration: 0.15, ease: "easeOut" }}
+    >
+      <motion.div
+        animate={{ opacity: 1, y: 0 }}
+        aria-labelledby="confirm-dialog-title"
+        aria-describedby="confirm-dialog-message"
+        className="w-full max-w-md rounded-lg border border-border bg-surface p-5 shadow-interactive"
+        exit={{ opacity: 0, y: 8 }}
+        initial={{ opacity: 0, y: 8 }}
+        onMouseDown={(event) => event.stopPropagation()}
+        transition={{ duration: 0.18, ease: "easeOut" }}
+      >
+        <div className="flex items-start gap-3">
+          {isDangerous && (
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-red-50 text-error dark:bg-red-950/30">
+              <AlertTriangle aria-hidden="true" className="h-5 w-5" />
+            </div>
+          )}
+          <div className="min-w-0">
+            <h2 className="text-lg font-semibold text-text-primary" id="confirm-dialog-title">
+              {title}
+            </h2>
+            <p className="mt-2 text-sm leading-6 text-text-secondary" id="confirm-dialog-message">
+              {message}
+            </p>
+          </div>
+        </div>
+
+        <div className="mt-5 flex justify-end gap-2">
+          <button
+            className="h-10 rounded-lg border border-border px-4 text-sm font-medium text-text-secondary transition duration-150 ease-out hover:-translate-y-px hover:text-text-primary hover:shadow-interactive"
+            onClick={onCancel}
+            type="button"
+          >
+            {cancelLabel}
+          </button>
+          <button
+            className={`h-10 rounded-lg px-4 text-sm font-medium text-white transition duration-150 ease-out hover:-translate-y-px hover:shadow-interactive ${
+              isDangerous ? "bg-error" : "bg-accent hover:bg-accent-hover"
+            }`}
+            onClick={onConfirm}
+            type="button"
+          >
+            {confirmLabel}
+          </button>
+        </div>
+      </motion.div>
+    </motion.div>
+  );
+}
+
+function getDeleteConfirmationTitle(deleteConfirmation: DeleteConfirmation): string {
+  if (deleteConfirmation.kind === "subject") {
+    return `Delete ${deleteConfirmation.subject.name}?`;
+  }
+
+  if (deleteConfirmation.kind === "document") {
+    return `Delete ${deleteConfirmation.document.filename}?`;
+  }
+
+  return `Delete this ${getGeneratedDeleteLabel(deleteConfirmation.content)}?`;
+}
+
+function getDeleteConfirmationMessage(deleteConfirmation: DeleteConfirmation): string {
+  if (deleteConfirmation.kind === "subject") {
+    return "This will permanently delete all documents, chat history, and generated content.";
+  }
+
+  if (deleteConfirmation.kind === "document") {
+    return "This will remove it and its content from chat/search.";
+  }
+
+  return "This cannot be undone.";
+}
+
+function getGeneratedDeleteLabel(content: GeneratedContent): string {
+  const payload = getGeneratedPayload(content);
+
+  if (content.type === "summary") {
+    return "Summary";
+  }
+
+  if (content.type === "mcq") {
+    const questionCount = getArrayLength(payload, "questions");
+    return `MCQ set (${questionCount} ${questionCount === 1 ? "question" : "questions"})`;
+  }
+
+  const cardCount = getArrayLength(payload, "cards");
+  return `Flashcard set (${cardCount} ${cardCount === 1 ? "card" : "cards"})`;
+}
+
 function SubjectsDashboard({
+  deleteError,
+  deletingSubjectId,
+  onDelete,
   onCreate,
   onRefresh,
+  onRename,
   onSelect,
   stats,
   subjects,
 }: {
+  deleteError: string | null;
+  deletingSubjectId: number | null;
+  onDelete: (subject: Subject) => void;
   onCreate: () => void;
   onRefresh: () => void;
+  onRename: (subjectId: number, name: string) => Promise<void>;
   onSelect: (id: number) => void;
   stats: DashboardStatsState;
   subjects: SubjectsState;
@@ -483,6 +909,7 @@ function SubjectsDashboard({
 
       {subjects.status === "loading" && <SubjectGridSkeleton />}
       {subjects.status === "error" && <ErrorPanel message={subjects.message} />}
+      {deleteError && <ErrorPanel message={deleteError} />}
       {subjects.status === "ready" && subjects.data.length === 0 && (
         <section className="rounded-lg border border-border bg-surface p-8 text-center">
           <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-lg bg-accent-soft text-accent">
@@ -497,6 +924,271 @@ function SubjectsDashboard({
       {subjects.status === "ready" && subjects.data.length > 0 && (
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
           {subjects.data.map((subject) => (
+            <SubjectCard
+              deletingSubjectId={deletingSubjectId}
+              key={subject.id}
+              onDelete={onDelete}
+              onRename={onRename}
+              onSelect={onSelect}
+              subject={subject}
+            />
+          ))}
+        </div>
+      )}
+    </motion.section>
+  );
+}
+
+function SubjectCard({
+  deletingSubjectId,
+  onDelete,
+  onRename,
+  onSelect,
+  subject,
+}: {
+  deletingSubjectId: number | null;
+  onDelete: (subject: Subject) => void;
+  onRename: (subjectId: number, name: string) => Promise<void>;
+  onSelect: (id: number) => void;
+  subject: Subject;
+}) {
+  const [isEditingName, setIsEditingName] = useState(false);
+
+  return (
+    <div className="rounded-lg border border-border bg-surface p-5 transition duration-150 ease-out hover:-translate-y-px hover:shadow-interactive">
+      <div className="flex items-start justify-between gap-4">
+        <button
+          className="min-w-0 flex-1 text-left"
+          onClick={() => onSelect(subject.id)}
+          type="button"
+        >
+          <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-accent-soft text-accent">
+            <Folder aria-hidden="true" className="h-5 w-5" />
+          </div>
+        </button>
+        <div className="flex shrink-0 items-center gap-2">
+          <span className="rounded-lg bg-surface-alt px-2.5 py-1 font-mono text-xs text-text-secondary">
+            {subject.document_count} docs
+          </span>
+          <button
+            aria-label={`Rename ${subject.name}`}
+            className="flex h-9 w-9 items-center justify-center rounded-lg border border-border bg-surface text-text-secondary transition duration-150 ease-out hover:-translate-y-px hover:text-accent hover:shadow-interactive"
+            onClick={() => setIsEditingName(true)}
+            title={`Rename ${subject.name}`}
+            type="button"
+          >
+            <Pencil aria-hidden="true" className="h-4 w-4" />
+          </button>
+          <button
+            aria-label={`Delete ${subject.name}`}
+            className="flex h-9 w-9 items-center justify-center rounded-lg border border-border bg-surface text-text-secondary transition duration-150 ease-out hover:-translate-y-px hover:border-error hover:text-error hover:shadow-interactive disabled:cursor-not-allowed disabled:opacity-60"
+            disabled={deletingSubjectId === subject.id}
+            onClick={() => onDelete(subject)}
+            title={`Delete ${subject.name}`}
+            type="button"
+          >
+            {deletingSubjectId === subject.id ? (
+              <SkeletonDot className="h-4 w-4" tone="accent" />
+            ) : (
+              <Trash2 aria-hidden="true" className="h-4 w-4" />
+            )}
+          </button>
+        </div>
+      </div>
+      <div className="mt-4">
+        <InlineSubjectNameEditor
+          className="text-lg font-semibold text-text-primary"
+          isEditing={isEditingName}
+          onEditingChange={setIsEditingName}
+          onRename={onRename}
+          subject={subject}
+        />
+        <button
+          className="mt-2 block text-left text-sm text-text-secondary transition duration-150 ease-out hover:text-text-primary"
+          onClick={() => onSelect(subject.id)}
+          type="button"
+        >
+          Created {new Date(subject.created_at).toLocaleDateString()}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function InlineSubjectNameEditor({
+  className,
+  isEditing,
+  onEditingChange,
+  onRename,
+  subject,
+}: {
+  className: string;
+  isEditing: boolean;
+  onEditingChange: (isEditing: boolean) => void;
+  onRename: (subjectId: number, name: string) => Promise<void>;
+  subject: Subject;
+}) {
+  const [draftName, setDraftName] = useState(subject.name);
+  const [error, setError] = useState<string | null>(null);
+  const [isSaving, setIsSaving] = useState(false);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const shouldSkipBlurSave = useRef(false);
+
+  useEffect(() => {
+    if (!isEditing) {
+      setDraftName(subject.name);
+    }
+  }, [isEditing, subject.name]);
+
+  useEffect(() => {
+    if (isEditing) {
+      window.setTimeout(() => {
+        inputRef.current?.focus();
+        inputRef.current?.select();
+      }, 0);
+    }
+  }, [isEditing]);
+
+  async function save() {
+    if (isSaving) {
+      return;
+    }
+
+    const nextName = draftName.trim();
+    if (!nextName) {
+      setError("Subject name is required.");
+      inputRef.current?.focus();
+      return;
+    }
+
+    if (nextName === subject.name) {
+      setError(null);
+      onEditingChange(false);
+      return;
+    }
+
+    setIsSaving(true);
+    setError(null);
+
+    try {
+      await onRename(subject.id, nextName);
+      onEditingChange(false);
+    } catch (caughtError) {
+      setError(getMessage(caughtError));
+      inputRef.current?.focus();
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  function cancel() {
+    shouldSkipBlurSave.current = true;
+    setDraftName(subject.name);
+    setError(null);
+    onEditingChange(false);
+  }
+
+  if (!isEditing) {
+    return (
+      <button
+        className={`block max-w-full text-left transition duration-150 ease-out hover:text-accent ${className}`}
+        onClick={() => onEditingChange(true)}
+        title={`Rename ${subject.name}`}
+        type="button"
+      >
+        {subject.name}
+      </button>
+    );
+  }
+
+  return (
+    <div className="min-w-0 flex-1">
+      <input
+        aria-label="Subject name"
+        className={`min-h-10 w-full rounded-lg border border-border bg-surface-alt px-3 py-1 text-text-primary outline-none transition duration-150 ease-out focus:border-accent ${className}`}
+        disabled={isSaving}
+        maxLength={120}
+        onBlur={() => {
+          if (shouldSkipBlurSave.current) {
+            shouldSkipBlurSave.current = false;
+            return;
+          }
+          void save();
+        }}
+        onChange={(event) => {
+          setDraftName(event.target.value);
+          setError(null);
+        }}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") {
+            event.preventDefault();
+            cancel();
+          }
+          if (event.key === "Enter") {
+            event.preventDefault();
+            void save();
+          }
+        }}
+        ref={inputRef}
+        value={draftName}
+      />
+      {error && <p className="mt-1 text-xs font-medium text-error">{error}</p>}
+    </div>
+  );
+}
+
+function SubjectPickerPage({
+  actionLabel,
+  description,
+  emptyMessage,
+  icon: Icon,
+  onSelect,
+  onSubjects,
+  subjects,
+  title,
+}: {
+  actionLabel: string;
+  description: string;
+  emptyMessage: string;
+  icon: LucideIcon;
+  onSelect: (id: number) => void;
+  onSubjects: () => void;
+  subjects: SubjectsState;
+  title: string;
+}) {
+  return (
+    <motion.section
+      animate={{ opacity: 1, y: 0 }}
+      className="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-6 px-4 py-6 md:px-6 md:py-8"
+      exit={{ opacity: 0, y: 8 }}
+      initial={{ opacity: 0, y: 8 }}
+      transition={{ duration: 0.2, ease: "easeOut" }}
+    >
+      <div>
+        <p className="font-mono text-xs font-medium uppercase text-accent">{actionLabel}</p>
+        <h1 className="mt-2 text-3xl font-semibold text-text-primary">{title}</h1>
+        <p className="mt-2 max-w-2xl text-sm leading-6 text-text-secondary">{description}</p>
+      </div>
+
+      {subjects.status === "loading" && <SubjectGridSkeleton />}
+      {subjects.status === "error" && <ErrorPanel message={subjects.message} />}
+      {subjects.status === "ready" && subjects.data.length === 0 && (
+        <section className="rounded-lg border border-border bg-surface p-8 text-center">
+          <Icon aria-hidden="true" className="mx-auto h-7 w-7 text-accent" />
+          <h2 className="mt-4 text-lg font-semibold text-text-primary">{emptyMessage}</h2>
+          <button
+            className="mt-4 inline-flex h-10 items-center gap-2 rounded-lg bg-accent px-4 text-sm font-medium text-white transition duration-150 ease-out hover:-translate-y-px hover:bg-accent-hover hover:shadow-interactive"
+            onClick={onSubjects}
+            type="button"
+          >
+            <Folder aria-hidden="true" className="h-4 w-4" />
+            Subjects
+          </button>
+        </section>
+      )}
+      {subjects.status === "ready" && subjects.data.length > 0 && (
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+          {subjects.data.map((subject) => (
             <button
               className="rounded-lg border border-border bg-surface p-5 text-left transition duration-150 ease-out hover:-translate-y-px hover:shadow-interactive"
               key={subject.id}
@@ -505,16 +1197,14 @@ function SubjectsDashboard({
             >
               <div className="flex items-start justify-between gap-4">
                 <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-accent-soft text-accent">
-                  <Folder aria-hidden="true" className="h-5 w-5" />
+                  <Icon aria-hidden="true" className="h-5 w-5" />
                 </div>
                 <span className="rounded-lg bg-surface-alt px-2.5 py-1 font-mono text-xs text-text-secondary">
                   {subject.document_count} docs
                 </span>
               </div>
               <h2 className="mt-4 text-lg font-semibold text-text-primary">{subject.name}</h2>
-              <p className="mt-2 text-sm text-text-secondary">
-                Created {new Date(subject.created_at).toLocaleDateString()}
-              </p>
+              <p className="mt-2 text-sm text-text-secondary">{actionLabel}</p>
             </button>
           ))}
         </div>
@@ -523,26 +1213,375 @@ function SubjectsDashboard({
   );
 }
 
+function StudySetsOverview({
+  generatedSets,
+  onDeleteGenerated,
+  onRefresh,
+  onSelectSubject,
+  onSubjects,
+  subjects,
+}: {
+  generatedSets: GeneratedContentState;
+  onDeleteGenerated: (content: GeneratedContent) => void;
+  onRefresh: () => void;
+  onSelectSubject: (id: number) => void;
+  onSubjects: () => void;
+  subjects: SubjectsState;
+}) {
+  const [categoryFilter, setCategoryFilter] = useState<StudySetCategoryFilter>("all");
+  const [subjectFilter, setSubjectFilter] = useState("all");
+  const subjectNames = new Map(
+    subjects.status === "ready" ? subjects.data.map((subject) => [subject.id, subject.name]) : [],
+  );
+  const subjectOptions = subjects.status === "ready" ? subjects.data : [];
+  const selectedSubjectId = subjectFilter === "all" ? null : Number(subjectFilter);
+  const selectedSubjectName =
+    selectedSubjectId === null ? null : subjectNames.get(selectedSubjectId) ?? `Subject ${selectedSubjectId}`;
+  const filteredGeneratedSets =
+    generatedSets.status === "ready"
+      ? generatedSets.data.filter((item) => {
+          const matchesCategory = categoryFilter === "all" || item.type === categoryFilter;
+          const matchesSubject = selectedSubjectId === null || item.subject_id === selectedSubjectId;
+          return matchesCategory && matchesSubject;
+        })
+      : [];
+
+  useEffect(() => {
+    if (subjectFilter === "all" || subjects.status !== "ready") {
+      return;
+    }
+
+    const selectedId = Number(subjectFilter);
+    if (!subjects.data.some((subject) => subject.id === selectedId)) {
+      setSubjectFilter("all");
+    }
+  }, [subjectFilter, subjects]);
+
+  return (
+    <motion.section
+      animate={{ opacity: 1, y: 0 }}
+      className="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-6 px-4 py-6 md:px-6 md:py-8"
+      exit={{ opacity: 0, y: 8 }}
+      initial={{ opacity: 0, y: 8 }}
+      transition={{ duration: 0.2, ease: "easeOut" }}
+    >
+      <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+        <div>
+          <p className="font-mono text-xs font-medium uppercase text-accent">Study Sets</p>
+          <h1 className="mt-2 text-3xl font-semibold text-text-primary">Generated study content</h1>
+          <p className="mt-2 max-w-2xl text-sm leading-6 text-text-secondary">
+            Previously generated summaries, MCQs, and flashcards across all subjects.
+          </p>
+        </div>
+        <IconButton ariaLabel="Refresh study sets" icon={RefreshCw} onClick={onRefresh} />
+      </div>
+
+      {generatedSets.status === "loading" && <DocumentListSkeleton />}
+      {generatedSets.status === "error" && <ErrorPanel message={generatedSets.message} />}
+      {generatedSets.status === "ready" && generatedSets.data.length > 0 && (
+        <>
+          <section className="rounded-lg border border-border bg-surface p-4">
+            <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+              <div>
+                <p className="text-xs font-medium uppercase text-text-secondary">Category</p>
+                <div className="mt-2 grid grid-cols-2 rounded-lg border border-border bg-surface-alt p-1 sm:flex">
+                  {studySetCategoryOptions.map((option) => (
+                    <button
+                      aria-pressed={categoryFilter === option.value}
+                      className={`h-9 rounded-md px-3 text-sm font-medium transition duration-150 ease-out ${
+                        categoryFilter === option.value
+                          ? "bg-surface text-accent shadow-interactive"
+                          : "text-text-secondary hover:text-text-primary"
+                      }`}
+                      key={option.value}
+                      onClick={() => setCategoryFilter(option.value)}
+                      type="button"
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="min-w-0 lg:w-72">
+                <label className="text-xs font-medium uppercase text-text-secondary" htmlFor="study-set-subject-filter">
+                  Subject
+                </label>
+                <div className="relative mt-2">
+                  <select
+                    className="h-10 w-full appearance-none rounded-lg border border-border bg-surface-alt px-3 pr-9 text-sm font-medium text-text-primary outline-none transition duration-150 ease-out focus:border-accent"
+                    id="study-set-subject-filter"
+                    onChange={(event) => setSubjectFilter(event.target.value)}
+                    value={subjectFilter}
+                  >
+                    <option value="all">All Subjects</option>
+                    {subjectOptions.map((subject) => (
+                      <option key={subject.id} value={String(subject.id)}>
+                        {subject.name}
+                      </option>
+                    ))}
+                  </select>
+                  <ChevronDown
+                    aria-hidden="true"
+                    className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-text-secondary"
+                  />
+                </div>
+              </div>
+            </div>
+            <p className="mt-3 text-sm text-text-secondary">
+              Showing {filteredGeneratedSets.length} of {generatedSets.data.length} study sets
+            </p>
+          </section>
+
+          {filteredGeneratedSets.length === 0 ? (
+            <section className="rounded-lg border border-border bg-surface p-8 text-center">
+              <Layers aria-hidden="true" className="mx-auto h-7 w-7 text-accent" />
+              <h2 className="mt-4 text-lg font-semibold text-text-primary">
+                {getStudySetFilterEmptyTitle(categoryFilter, selectedSubjectName)}
+              </h2>
+              <p className="mx-auto mt-2 max-w-md text-sm leading-6 text-text-secondary">
+                Adjust the filters or select a subject to generate more study content.
+              </p>
+            </section>
+          ) : (
+            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+              {filteredGeneratedSets.map((item) => (
+                <GeneratedOverviewCard
+                  item={item}
+                  key={item.id}
+                  onDelete={onDeleteGenerated}
+                  onSelectSubject={onSelectSubject}
+                  subjectName={subjectNames.get(item.subject_id) ?? `Subject ${item.subject_id}`}
+                />
+              ))}
+            </div>
+          )}
+        </>
+      )}
+      {generatedSets.status === "ready" && generatedSets.data.length === 0 && (
+        <section className="rounded-lg border border-border bg-surface p-8 text-center">
+          <Layers aria-hidden="true" className="mx-auto h-7 w-7 text-accent" />
+          <h2 className="mt-4 text-lg font-semibold text-text-primary">No study sets yet</h2>
+          <p className="mx-auto mt-2 max-w-md text-sm leading-6 text-text-secondary">
+            Select a subject to generate summaries, MCQs, or flashcards.
+          </p>
+          <button
+            className="mt-4 inline-flex h-10 items-center gap-2 rounded-lg bg-accent px-4 text-sm font-medium text-white transition duration-150 ease-out hover:-translate-y-px hover:bg-accent-hover hover:shadow-interactive"
+            onClick={onSubjects}
+            type="button"
+          >
+            <Folder aria-hidden="true" className="h-4 w-4" />
+            Subjects
+          </button>
+        </section>
+      )}
+    </motion.section>
+  );
+}
+
+function GeneratedOverviewCard({
+  item,
+  onDelete,
+  onSelectSubject,
+  subjectName,
+}: {
+  item: GeneratedContent;
+  onDelete: (content: GeneratedContent) => void;
+  onSelectSubject: (id: number) => void;
+  subjectName: string;
+}) {
+  return (
+    <div className="rounded-lg border border-border bg-surface p-4 transition duration-150 ease-out hover:-translate-y-px hover:shadow-interactive">
+      <div className="flex items-start justify-between gap-3">
+        <button
+          className="min-w-0 flex-1 text-left"
+          onClick={() => onSelectSubject(item.subject_id)}
+          type="button"
+        >
+          <p className="text-xs font-medium uppercase text-text-secondary">{subjectName}</p>
+          <h2 className="mt-2 text-sm font-semibold capitalize text-text-primary">{item.type}</h2>
+          <p className="mt-1 line-clamp-2 text-sm text-text-secondary">{getGeneratedTitle(item)}</p>
+          <p className="mt-3 text-xs text-text-secondary">
+            {new Date(item.created_at).toLocaleString()}
+          </p>
+        </button>
+        <button
+          aria-label={`Delete ${getGeneratedDeleteLabel(item)}`}
+          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-border bg-surface text-text-secondary transition duration-150 ease-out hover:-translate-y-px hover:border-error hover:text-error hover:shadow-interactive"
+          onClick={() => onDelete(item)}
+          title={`Delete ${getGeneratedDeleteLabel(item)}`}
+          type="button"
+        >
+          <Trash2 aria-hidden="true" className="h-3.5 w-3.5" />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function getStudySetFilterEmptyTitle(
+  categoryFilter: StudySetCategoryFilter,
+  subjectName: string | null,
+): string {
+  const categoryLabel =
+    categoryFilter === "summary"
+      ? "summaries"
+      : categoryFilter === "mcq"
+        ? "MCQs"
+        : categoryFilter === "flashcard"
+          ? "flashcards"
+          : "study sets";
+
+  return subjectName
+    ? `No ${categoryLabel} found for ${subjectName}`
+    : `No ${categoryLabel} found`;
+}
+
+function ComingSoonPage({ onSubjects }: { onSubjects: () => void }) {
+  return (
+    <motion.section
+      animate={{ opacity: 1, y: 0 }}
+      className="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-6 px-4 py-6 md:px-6 md:py-8"
+      exit={{ opacity: 0, y: 8 }}
+      initial={{ opacity: 0, y: 8 }}
+      transition={{ duration: 0.2, ease: "easeOut" }}
+    >
+      <section className="rounded-lg border border-border bg-surface p-8">
+        <GraduationCap aria-hidden="true" className="h-8 w-8 text-accent" />
+        <h1 className="mt-4 text-3xl font-semibold text-text-primary">Exam Prep</h1>
+        <p className="mt-2 max-w-2xl text-sm leading-6 text-text-secondary">
+          Coming soon. This section is intentionally out of scope for the current build.
+        </p>
+        <button
+          className="mt-5 inline-flex h-10 items-center gap-2 rounded-lg border border-border px-4 text-sm font-medium text-text-secondary transition duration-150 ease-out hover:-translate-y-px hover:text-text-primary hover:shadow-interactive"
+          onClick={onSubjects}
+          type="button"
+        >
+          <Folder aria-hidden="true" className="h-4 w-4" />
+          Back to Subjects
+        </button>
+      </section>
+    </motion.section>
+  );
+}
+
+function SettingsPage({
+  llmConfig,
+  onRefresh,
+  onToggleTheme,
+  theme,
+}: {
+  llmConfig: LlmConfigState;
+  onRefresh: () => void;
+  onToggleTheme: () => void;
+  theme: "light" | "dark";
+}) {
+  return (
+    <motion.section
+      animate={{ opacity: 1, y: 0 }}
+      className="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-6 px-4 py-6 md:px-6 md:py-8"
+      exit={{ opacity: 0, y: 8 }}
+      initial={{ opacity: 0, y: 8 }}
+      transition={{ duration: 0.2, ease: "easeOut" }}
+    >
+      <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+        <div>
+          <p className="font-mono text-xs font-medium uppercase text-accent">Settings</p>
+          <h1 className="mt-2 text-3xl font-semibold text-text-primary">Workspace settings</h1>
+        </div>
+        <IconButton ariaLabel="Refresh LLM settings" icon={RefreshCw} onClick={onRefresh} />
+      </div>
+
+      <section className="rounded-lg border border-border bg-surface p-5">
+        <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+          <div>
+            <h2 className="text-lg font-semibold text-text-primary">Appearance</h2>
+            <p className="mt-1 text-sm text-text-secondary">Theme preference for this browser.</p>
+          </div>
+          <button
+            aria-pressed={theme === "dark"}
+            className="inline-flex h-10 items-center gap-2 rounded-lg border border-border px-4 text-sm font-medium text-text-secondary transition duration-150 ease-out hover:-translate-y-px hover:text-text-primary hover:shadow-interactive"
+            onClick={onToggleTheme}
+            type="button"
+          >
+            {theme === "dark" ? (
+              <Sun aria-hidden="true" className="h-4 w-4" />
+            ) : (
+              <Moon aria-hidden="true" className="h-4 w-4" />
+            )}
+            {theme === "dark" ? "Use light mode" : "Use dark mode"}
+          </button>
+        </div>
+      </section>
+
+      <section className="rounded-lg border border-border bg-surface p-5">
+        <h2 className="text-lg font-semibold text-text-primary">LLM provider</h2>
+        <p className="mt-1 text-sm text-text-secondary">Read-only configuration loaded by the backend.</p>
+        <div className="mt-5">
+          {llmConfig.status === "loading" && <DocumentListSkeleton />}
+          {llmConfig.status === "error" && <ErrorPanel message={llmConfig.message} />}
+          {llmConfig.status === "ready" && (
+            <dl className="grid gap-3 md:grid-cols-2">
+              <SettingValue label="Ollama host" value={llmConfig.data.ollama_host} />
+              <SettingValue label="Ollama model" value={llmConfig.data.ollama_model} />
+              <SettingValue
+                label="Groq fallback"
+                value={llmConfig.data.groq_configured ? "Configured" : "Not configured"}
+              />
+              <SettingValue label="Groq model" value={llmConfig.data.groq_model} />
+            </dl>
+          )}
+        </div>
+      </section>
+    </motion.section>
+  );
+}
+
+function SettingValue({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-lg border border-border bg-surface-alt p-4">
+      <dt className="text-xs font-medium uppercase text-text-secondary">{label}</dt>
+      <dd className="mt-2 break-words font-mono text-sm text-text-primary">{value}</dd>
+    </div>
+  );
+}
+
 function SubjectDetail({
+  deleteError,
+  deletingDocumentId,
   documents,
   isUploading,
   onBack,
+  onDeleteDocument,
+  onDeleteGenerated,
+  onRenameSubject,
   onRefresh,
+  onStudyGenerationChange,
   onUpload,
   refInput,
   subject,
   uploadError,
 }: {
+  deleteError: string | null;
+  deletingDocumentId: number | null;
   documents: DocumentsState;
   isUploading: boolean;
   onBack: () => void;
+  onDeleteDocument: (document: DocumentRecord) => void;
+  onDeleteGenerated: (
+    content: GeneratedContent,
+    onDeleted?: (content: GeneratedContent) => void,
+  ) => void;
+  onRenameSubject: (subjectId: number, name: string) => Promise<void>;
   onRefresh: () => void;
+  onStudyGenerationChange: (active: boolean) => void;
   onUpload: (file: File | undefined) => void;
   refInput: RefObject<HTMLInputElement>;
   subject: Subject;
   uploadError: string | null;
 }) {
   const documentCount = documents.status === "ready" ? documents.data.length : subject.document_count;
+  const [isEditingName, setIsEditingName] = useState(false);
 
   return (
     <motion.section
@@ -563,7 +1602,26 @@ function SubjectDetail({
             Subjects
           </button>
           <p className="font-mono text-xs font-medium uppercase text-accent">Subject</p>
-          <h1 className="mt-2 text-3xl font-semibold text-text-primary">{subject.name}</h1>
+          <div className="mt-2 flex flex-col gap-2 sm:flex-row sm:items-start">
+            <InlineSubjectNameEditor
+              className="text-3xl font-semibold text-text-primary"
+              isEditing={isEditingName}
+              onEditingChange={setIsEditingName}
+              onRename={onRenameSubject}
+              subject={subject}
+            />
+            {!isEditingName && (
+              <button
+                aria-label={`Rename ${subject.name}`}
+                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-border bg-surface text-text-secondary transition duration-150 ease-out hover:-translate-y-px hover:text-accent hover:shadow-interactive"
+                onClick={() => setIsEditingName(true)}
+                title={`Rename ${subject.name}`}
+                type="button"
+              >
+                <Pencil aria-hidden="true" className="h-4 w-4" />
+              </button>
+            )}
+          </div>
         </div>
         <div className="rounded-lg border border-border bg-surface px-4 py-3">
           <p className="text-xs font-medium uppercase text-text-secondary">Documents</p>
@@ -619,6 +1677,7 @@ function SubjectDetail({
           </div>
 
           <div className="mt-5">
+            {deleteError && <ErrorPanel message={deleteError} />}
             {documents.status === "loading" && <DocumentListSkeleton />}
             {documents.status === "error" && <ErrorPanel message={documents.message} />}
             {documents.status === "ready" && documents.data.length === 0 && (
@@ -630,7 +1689,12 @@ function SubjectDetail({
             {documents.status === "ready" && documents.data.length > 0 && (
               <div className="space-y-3">
                 {documents.data.map((document) => (
-                  <DocumentRow document={document} key={document.id} />
+                  <DocumentRow
+                    document={document}
+                    isDeleting={deletingDocumentId === document.id}
+                    key={document.id}
+                    onDelete={onDeleteDocument}
+                  />
                 ))}
               </div>
             )}
@@ -639,7 +1703,11 @@ function SubjectDetail({
       </div>
 
       <ChatPanel subject={subject} />
-      <StudyToolsPanel subject={subject} />
+      <StudyToolsPanel
+        onDeleteGenerated={onDeleteGenerated}
+        onGenerationChange={onStudyGenerationChange}
+        subject={subject}
+      />
     </motion.section>
   );
 }
@@ -798,7 +1866,7 @@ function ChatPanel({ subject }: { subject: Subject }) {
             </div>
             <IconButton ariaLabel="Refresh chat history" icon={RefreshCw} onClick={loadHistory} />
           </div>
-          <div className="mt-3 space-y-2">
+          <div className={sidebarListScrollClass}>
             {history.status === "loading" && <DocumentListSkeleton />}
             {history.status === "error" && <ErrorPanel message={history.message} />}
             {history.status === "ready" && history.data.length === 0 && (
@@ -908,7 +1976,18 @@ function ChatPanel({ subject }: { subject: Subject }) {
   );
 }
 
-function StudyToolsPanel({ subject }: { subject: Subject }) {
+function StudyToolsPanel({
+  onDeleteGenerated,
+  onGenerationChange,
+  subject,
+}: {
+  onDeleteGenerated: (
+    content: GeneratedContent,
+    onDeleted?: (content: GeneratedContent) => void,
+  ) => void;
+  onGenerationChange: (active: boolean) => void;
+  subject: Subject;
+}) {
   const [activeType, setActiveType] = useState<GenerationType>("summary");
   const [topic, setTopic] = useState("");
   const [generated, setGenerated] = useState<GeneratedContent | null>(null);
@@ -923,6 +2002,11 @@ function StudyToolsPanel({ subject }: { subject: Subject }) {
     setGenerated(null);
     loadGeneratedSets();
   }, [subject.id]);
+
+  useEffect(() => {
+    onGenerationChange(isGenerating);
+    return () => onGenerationChange(false);
+  }, [isGenerating, onGenerationChange]);
 
   function loadGeneratedSets() {
     setGeneratedSets({ status: "loading" });
@@ -940,6 +2024,30 @@ function StudyToolsPanel({ subject }: { subject: Subject }) {
     setFlippedCards({});
     setCardStates({});
     setError(null);
+  }
+
+  function handleGeneratedDeleted(deletedContent: GeneratedContent) {
+    setGeneratedSets((current) => {
+      if (current.status !== "ready") {
+        return current;
+      }
+
+      return {
+        status: "ready",
+        data: current.data.filter((item) => item.id !== deletedContent.id),
+      };
+    });
+
+    if (generated?.id === deletedContent.id) {
+      setGenerated(null);
+      setMcqAnswers({});
+      setFlippedCards({});
+      setCardStates({});
+    }
+  }
+
+  function requestGeneratedDelete(content: GeneratedContent) {
+    onDeleteGenerated(content, handleGeneratedDeleted);
   }
 
   async function handleGenerate(type: GenerationType = activeType) {
@@ -1044,7 +2152,7 @@ function StudyToolsPanel({ subject }: { subject: Subject }) {
             </div>
             <IconButton ariaLabel="Refresh generated sets" icon={RefreshCw} onClick={loadGeneratedSets} />
           </div>
-          <div className="mt-3 space-y-2">
+          <div className={sidebarListScrollClass}>
             {generatedSets.status === "loading" && <DocumentListSkeleton />}
             {generatedSets.status === "error" && <ErrorPanel message={generatedSets.message} />}
             {generatedSets.status === "ready" && generatedSets.data.length === 0 && (
@@ -1054,25 +2162,40 @@ function StudyToolsPanel({ subject }: { subject: Subject }) {
             )}
             {generatedSets.status === "ready" &&
               generatedSets.data.map((item) => (
-                <button
-                  aria-pressed={generated?.id === item.id}
-                  className={`w-full rounded-lg border p-3 text-left transition duration-150 ease-out hover:-translate-y-px hover:shadow-interactive ${
+                <div
+                  className={`rounded-lg border p-3 transition duration-150 ease-out hover:-translate-y-px hover:shadow-interactive ${
                     generated?.id === item.id
                       ? "border-accent bg-accent-soft"
                       : "border-border bg-surface"
                   }`}
                   key={item.id}
-                  onClick={() => openGeneratedSet(item)}
-                  type="button"
                 >
-                  <p className="text-sm font-medium capitalize text-text-primary">{item.type}</p>
-                  <p className="mt-1 line-clamp-2 text-xs text-text-secondary">
-                    {getGeneratedTitle(item)}
-                  </p>
-                  <p className="mt-2 text-xs text-text-secondary">
-                    {new Date(item.created_at).toLocaleString()}
-                  </p>
-                </button>
+                  <div className="flex items-start justify-between gap-2">
+                    <button
+                      aria-pressed={generated?.id === item.id}
+                      className="min-w-0 flex-1 text-left"
+                      onClick={() => openGeneratedSet(item)}
+                      type="button"
+                    >
+                      <p className="text-sm font-medium capitalize text-text-primary">{item.type}</p>
+                      <p className="mt-1 line-clamp-2 text-xs text-text-secondary">
+                        {getGeneratedTitle(item)}
+                      </p>
+                      <p className="mt-2 text-xs text-text-secondary">
+                        {new Date(item.created_at).toLocaleString()}
+                      </p>
+                    </button>
+                    <button
+                      aria-label={`Delete ${getGeneratedDeleteLabel(item)}`}
+                      className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-border bg-surface text-text-secondary transition duration-150 ease-out hover:-translate-y-px hover:border-error hover:text-error hover:shadow-interactive"
+                      onClick={() => requestGeneratedDelete(item)}
+                      title={`Delete ${getGeneratedDeleteLabel(item)}`}
+                      type="button"
+                    >
+                      <Trash2 aria-hidden="true" className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                </div>
               ))}
           </div>
         </aside>
@@ -1103,15 +2226,15 @@ function StudyToolsPanel({ subject }: { subject: Subject }) {
             </div>
           )}
 
-          {generated?.content_json.error && (
-            <ErrorPanel message={generated.content_json.error} />
+          {generated && getGeneratedError(generated) && (
+            <ErrorPanel message={getGeneratedError(generated) ?? "This generated set could not be displayed."} />
           )}
 
-          {generated?.content_json.type === "summary" && (
+          {isSummaryGeneratedContent(generated) && (
             <SummaryViewer content={generated.content_json} />
           )}
 
-          {generated?.content_json.type === "mcq" && (
+          {isMcqGeneratedContent(generated) && (
             <McqViewer
               answers={mcqAnswers}
               content={generated.content_json}
@@ -1121,7 +2244,7 @@ function StudyToolsPanel({ subject }: { subject: Subject }) {
             />
           )}
 
-          {generated?.content_json.type === "flashcard" && (
+          {isFlashcardGeneratedContent(generated) && (
             <FlashcardViewer
               cardStates={cardStates}
               content={generated.content_json}
@@ -1134,6 +2257,12 @@ function StudyToolsPanel({ subject }: { subject: Subject }) {
               }
             />
           )}
+
+          {generated &&
+            !getGeneratedError(generated) &&
+            !isRenderableGeneratedContent(generated) && (
+              <ErrorPanel message="This saved study set uses an older or incomplete format and cannot be displayed." />
+            )}
         </div>
       </div>
     </section>
@@ -1168,15 +2297,94 @@ function GeneratedExportActions({
 }
 
 function getGeneratedTitle(content: GeneratedContent): string {
-  if (content.content_json.type === "summary") {
-    return content.content_json.title;
+  const payload = getGeneratedPayload(content);
+  const error = getStringField(payload, "error");
+
+  if (error) {
+    return error;
   }
 
-  if (content.content_json.type === "mcq") {
-    return `${content.content_json.questions.length} questions`;
+  const payloadType = getStringField(payload, "type") ?? content.type;
+
+  if (payloadType === "summary") {
+    const title = getStringField(payload, "title");
+    const sectionCount = getArrayLength(payload, "sections");
+
+    if (title) {
+      return title;
+    }
+
+    return sectionCount === 1 ? "1 summary section" : `${sectionCount} summary sections`;
   }
 
-  return `${content.content_json.cards.length} cards`;
+  if (payloadType === "mcq") {
+    const questionCount = getArrayLength(payload, "questions");
+    return questionCount === 1 ? "1 question" : `${questionCount} questions`;
+  }
+
+  if (payloadType === "flashcard") {
+    const cardCount = getArrayLength(payload, "cards");
+    return cardCount === 1 ? "1 card" : `${cardCount} cards`;
+  }
+
+  return "Saved study set";
+}
+
+function getGeneratedPayload(content: GeneratedContent | null): Record<string, unknown> {
+  if (!content?.content_json || typeof content.content_json !== "object") {
+    return {};
+  }
+
+  return content.content_json as Record<string, unknown>;
+}
+
+function getStringField(payload: Record<string, unknown>, key: string): string | null {
+  const value = payload[key];
+  return typeof value === "string" && value.trim().length > 0 ? value : null;
+}
+
+function getArrayLength(payload: Record<string, unknown>, key: string): number {
+  const value = payload[key];
+  return Array.isArray(value) ? value.length : 0;
+}
+
+function getGeneratedError(content: GeneratedContent | null): string | null {
+  return getStringField(getGeneratedPayload(content), "error");
+}
+
+function isSummaryGeneratedContent(
+  content: GeneratedContent | null,
+): content is GeneratedContent & {
+  content_json: Extract<GeneratedContent["content_json"], { type: "summary" }>;
+} {
+  const payload = getGeneratedPayload(content);
+  return getStringField(payload, "type") === "summary" && Array.isArray(payload.sections);
+}
+
+function isMcqGeneratedContent(
+  content: GeneratedContent | null,
+): content is GeneratedContent & {
+  content_json: Extract<GeneratedContent["content_json"], { type: "mcq" }>;
+} {
+  const payload = getGeneratedPayload(content);
+  return getStringField(payload, "type") === "mcq" && Array.isArray(payload.questions);
+}
+
+function isFlashcardGeneratedContent(
+  content: GeneratedContent | null,
+): content is GeneratedContent & {
+  content_json: Extract<GeneratedContent["content_json"], { type: "flashcard" }>;
+} {
+  const payload = getGeneratedPayload(content);
+  return getStringField(payload, "type") === "flashcard" && Array.isArray(payload.cards);
+}
+
+function isRenderableGeneratedContent(content: GeneratedContent | null): boolean {
+  return (
+    isSummaryGeneratedContent(content) ||
+    isMcqGeneratedContent(content) ||
+    isFlashcardGeneratedContent(content)
+  );
 }
 
 function SummaryViewer({ content }: { content: Extract<GeneratedContent["content_json"], { type: "summary" }> }) {
@@ -1211,50 +2419,141 @@ function McqViewer({
   content: Extract<GeneratedContent["content_json"], { type: "mcq" }>;
   onAnswer: (questionId: number, optionIndex: number) => void;
 }) {
+  const [currentIndex, setCurrentIndex] = useState(0);
+  const questionCount = content.questions.length;
+  const activeIndex = Math.min(currentIndex, Math.max(questionCount - 1, 0));
+  const question = content.questions[activeIndex];
+  const answeredCount = content.questions.filter((item) => answers[item.id] !== undefined).length;
+
+  useEffect(() => {
+    setCurrentIndex(0);
+  }, [content]);
+
+  useEffect(() => {
+    if (currentIndex >= questionCount && questionCount > 0) {
+      setCurrentIndex(questionCount - 1);
+    }
+  }, [currentIndex, questionCount]);
+
+  if (!question) {
+    return <ErrorPanel message="This MCQ set does not contain any questions." />;
+  }
+
+  const selected = answers[question.id];
+  const isAnswered = selected !== undefined;
+  const selectedCorrectly = selected === question.correct_index;
+  const isFirstQuestion = activeIndex === 0;
+  const isLastQuestion = activeIndex === questionCount - 1;
+
   return (
-    <div className="space-y-4">
-      {content.questions.map((question) => {
-        const selected = answers[question.id];
-        const isAnswered = selected !== undefined;
+    <section className="rounded-lg border border-border bg-surface p-4">
+      <div className="flex flex-col gap-3 border-b border-border pb-4 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <p className="text-xs font-medium uppercase text-text-secondary">
+            Question {activeIndex + 1} of {questionCount}
+          </p>
+          <p className="mt-1 text-xs text-text-secondary">
+            {answeredCount} of {questionCount} answered
+          </p>
+        </div>
+        <div className="flex gap-1.5" aria-label="MCQ progress">
+          {content.questions.map((item, index) => {
+            const isCurrent = index === activeIndex;
+            const isComplete = answers[item.id] !== undefined;
+            const progressClass = isCurrent
+              ? "bg-accent"
+              : isComplete
+                ? "bg-accent/55"
+                : "bg-border";
 
-        return (
-          <section className="rounded-lg border border-border bg-surface p-4" key={question.id}>
-            <p className="text-sm font-semibold text-text-primary">
-              {question.id}. {question.question}
-            </p>
-            <div className="mt-3 grid gap-2">
-              {question.options.map((option, optionIndex) => {
-                const isCorrect = optionIndex === question.correct_index;
-                const isSelected = selected === optionIndex;
-                const stateClass =
-                  isAnswered && isCorrect
-                    ? "border-accent bg-accent-soft text-accent"
-                    : isAnswered && isSelected
-                      ? "border-error bg-red-50 text-error dark:bg-red-950/30"
-                      : "border-border bg-surface-alt text-text-primary";
+            return (
+              <span
+                aria-current={isCurrent ? "step" : undefined}
+                className={`h-2 w-8 rounded-full transition-colors ${progressClass}`}
+                key={item.id}
+                title={`Question ${index + 1}${isComplete ? " answered" : ""}`}
+              />
+            );
+          })}
+        </div>
+      </div>
 
-                return (
-                  <button
-                    className={`rounded-lg border px-3 py-2 text-left text-sm transition duration-150 ease-out hover:-translate-y-px hover:shadow-interactive ${stateClass}`}
-                    key={option}
-                    onClick={() => onAnswer(question.id, optionIndex)}
-                    type="button"
-                  >
-                    {option}
-                  </button>
-                );
-              })}
-            </div>
-            {isAnswered && (
-              <div className="mt-3 text-sm leading-6 text-text-secondary">
-                {question.explanation}
-                <CitationList citations={[question.citation]} />
-              </div>
-            )}
-          </section>
-        );
-      })}
-    </div>
+      <div className="mt-5">
+        <p className="text-base font-semibold leading-7 text-text-primary">{question.question}</p>
+        <div className="mt-4 grid gap-2">
+          {question.options.map((option, optionIndex) => {
+            const isCorrect = optionIndex === question.correct_index;
+            const isSelected = selected === optionIndex;
+            const stateClass =
+              isAnswered && isCorrect
+                ? "border-accent bg-accent-soft text-accent"
+                : isAnswered && isSelected
+                  ? "border-error bg-red-50 text-error dark:bg-red-950/30"
+                  : "border-border bg-surface-alt text-text-primary hover:-translate-y-px hover:shadow-interactive";
+
+            return (
+              <button
+                aria-pressed={isSelected}
+                className={`flex min-h-11 items-center justify-between gap-3 rounded-lg border px-3 py-2 text-left text-sm transition duration-150 ease-out disabled:cursor-default ${stateClass}`}
+                disabled={isAnswered}
+                key={option}
+                onClick={() => onAnswer(question.id, optionIndex)}
+                type="button"
+              >
+                <span>{option}</span>
+                {isAnswered && isCorrect && <CheckCircle2 aria-hidden="true" className="h-4 w-4 shrink-0" />}
+                {isAnswered && isSelected && !isCorrect && <X aria-hidden="true" className="h-4 w-4 shrink-0" />}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {isAnswered && (
+        <div
+          className={`mt-4 rounded-lg border p-4 ${
+            selectedCorrectly
+              ? "border-accent bg-accent-soft"
+              : "border-error bg-red-50 dark:bg-red-950/30"
+          }`}
+        >
+          <p className={`text-sm font-semibold ${selectedCorrectly ? "text-accent" : "text-error"}`}>
+            {selectedCorrectly ? "Correct answer" : "Correct answer revealed"}
+          </p>
+          <p className="mt-2 text-sm leading-6 text-text-primary">
+            {question.options[question.correct_index]}
+          </p>
+          {question.explanation && (
+            <p className="mt-3 text-sm leading-6 text-text-secondary">{question.explanation}</p>
+          )}
+          <CitationList citations={[question.citation]} />
+        </div>
+      )}
+
+      <div className="mt-5 flex flex-col gap-3 border-t border-border pt-4 sm:flex-row sm:items-center sm:justify-between">
+        <button
+          className="inline-flex h-10 items-center justify-center gap-2 rounded-lg border border-border px-4 text-sm font-medium text-text-secondary transition duration-150 ease-out hover:-translate-y-px hover:text-text-primary hover:shadow-interactive disabled:cursor-not-allowed disabled:opacity-50"
+          disabled={isFirstQuestion}
+          onClick={() => setCurrentIndex((index) => Math.max(index - 1, 0))}
+          type="button"
+        >
+          <ArrowLeft aria-hidden="true" className="h-4 w-4" />
+          Previous
+        </button>
+        <p className="text-center text-xs text-text-secondary">
+          {isAnswered ? "Review the citation, then continue." : "Choose an answer to continue."}
+        </p>
+        <button
+          className="inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-accent px-4 text-sm font-medium text-white transition duration-150 ease-out hover:-translate-y-px hover:bg-accent-hover hover:shadow-interactive disabled:cursor-not-allowed disabled:opacity-50"
+          disabled={!isAnswered || isLastQuestion}
+          onClick={() => setCurrentIndex((index) => Math.min(index + 1, questionCount - 1))}
+          type="button"
+        >
+          Next
+          <ArrowRight aria-hidden="true" className="h-4 w-4" />
+        </button>
+      </div>
+    </section>
   );
 }
 
@@ -1280,16 +2579,41 @@ function FlashcardViewer({
         return (
           <section className="rounded-lg border border-border bg-surface p-4" key={card.id}>
             <button
-              className="min-h-36 w-full rounded-lg border border-border bg-surface-alt p-4 text-left transition duration-150 ease-out hover:-translate-y-px hover:shadow-interactive"
+              aria-label={isFlipped ? "Show flashcard front" : "Show flashcard back"}
+              className="w-full text-left [perspective:1000px]"
               onClick={() => onFlip(card.id)}
               type="button"
             >
-              <p className="text-xs font-medium uppercase text-text-secondary">
-                {isFlipped ? "Back" : "Front"}
-              </p>
-              <p className="mt-3 text-sm leading-6 text-text-primary">
-                {isFlipped ? card.back : card.front}
-              </p>
+              <motion.div
+                animate={{ rotateY: isFlipped ? 180 : 0 }}
+                className="grid rounded-lg transition duration-150 ease-out hover:-translate-y-px hover:shadow-interactive"
+                style={{ transformStyle: "preserve-3d" }}
+                transition={{ duration: 0.18, ease: "easeInOut", type: "tween" }}
+              >
+                <div
+                  className="min-h-36 rounded-lg border border-border bg-surface-alt p-4"
+                  style={{
+                    backfaceVisibility: "hidden",
+                    gridArea: "1 / 1",
+                    WebkitBackfaceVisibility: "hidden",
+                  }}
+                >
+                  <p className="text-xs font-medium uppercase text-text-secondary">Front</p>
+                  <p className="mt-3 text-sm leading-6 text-text-primary">{card.front}</p>
+                </div>
+                <div
+                  className="min-h-36 rounded-lg border border-border bg-surface-alt p-4"
+                  style={{
+                    backfaceVisibility: "hidden",
+                    gridArea: "1 / 1",
+                    transform: "rotateY(180deg)",
+                    WebkitBackfaceVisibility: "hidden",
+                  }}
+                >
+                  <p className="text-xs font-medium uppercase text-text-secondary">Back</p>
+                  <p className="mt-3 text-sm leading-6 text-text-primary">{card.back}</p>
+                </div>
+              </motion.div>
             </button>
             {isFlipped && <CitationList citations={[card.citation]} />}
             <div className="mt-3 grid grid-cols-2 gap-2">
@@ -1347,7 +2671,15 @@ function CitationList({ citations }: { citations: Citation[] }) {
   );
 }
 
-function DocumentRow({ document }: { document: DocumentRecord }) {
+function DocumentRow({
+  document,
+  isDeleting,
+  onDelete,
+}: {
+  document: DocumentRecord;
+  isDeleting: boolean;
+  onDelete: (document: DocumentRecord) => void;
+}) {
   const Icon = statusIcons[document.upload_status];
 
   return (
@@ -1363,15 +2695,31 @@ function DocumentRow({ document }: { document: DocumentRecord }) {
             {document.page_count ? ` · ${document.page_count} pages` : ""}
           </p>
         </div>
-        <span
-          className={`inline-flex h-8 shrink-0 items-center gap-2 rounded-lg px-3 text-xs font-medium ${statusStyles[document.upload_status]}`}
-        >
-          <Icon
-            aria-hidden="true"
-            className="h-3.5 w-3.5"
-          />
-          {formatStatus(document.upload_status)}
-        </span>
+        <div className="flex shrink-0 items-center gap-2">
+          <span
+            className={`inline-flex h-8 items-center gap-2 rounded-lg px-3 text-xs font-medium ${statusStyles[document.upload_status]}`}
+          >
+            <Icon
+              aria-hidden="true"
+              className="h-3.5 w-3.5"
+            />
+            {formatStatus(document.upload_status)}
+          </span>
+          <button
+            aria-label={`Delete ${document.filename}`}
+            className="flex h-8 w-8 items-center justify-center rounded-lg border border-border bg-surface text-text-secondary transition duration-150 ease-out hover:-translate-y-px hover:border-error hover:text-error hover:shadow-interactive disabled:cursor-not-allowed disabled:opacity-60"
+            disabled={isDeleting}
+            onClick={() => onDelete(document)}
+            title={`Delete ${document.filename}`}
+            type="button"
+          >
+            {isDeleting ? (
+              <SkeletonDot className="h-3.5 w-3.5" tone="accent" />
+            ) : (
+              <Trash2 aria-hidden="true" className="h-3.5 w-3.5" />
+            )}
+          </button>
+        </div>
       </div>
       {document.error_message && (
         <p className="mt-3 rounded-lg border border-border bg-surface px-3 py-2 text-xs text-error">
@@ -1529,6 +2877,11 @@ function ErrorPanel({ message }: { message: string }) {
 
 function getMessage(error: unknown): string {
   return error instanceof Error ? error.message : "Something went wrong.";
+}
+
+function getViewLabel(view: AppView): string {
+  const item = navItems.find((navItem) => navItem.id === view);
+  return item?.label ?? "Subjects";
 }
 
 function formatStatus(status: DocumentRecord["upload_status"]): string {

@@ -38,6 +38,20 @@ def get_subject_collection_name(subject_id: int) -> str:
     return f"subject_{subject_id}"
 
 
+def delete_subject_collection(subject_id: int) -> None:
+    client = get_chroma_client()
+    try:
+        client.delete_collection(get_subject_collection_name(subject_id))
+    except Exception as exc:
+        if "does not exist" not in str(exc).lower():
+            raise
+
+
+def delete_document_vectors(subject_id: int, document_id: int) -> None:
+    collection = get_subject_collection(subject_id)
+    collection.delete(where={"document_id": document_id})
+
+
 def index_document_chunks(
     db: Session,
     document: Document,

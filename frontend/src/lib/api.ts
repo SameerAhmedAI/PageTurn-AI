@@ -84,6 +84,13 @@ export type GeneratedContent = {
   created_at: string;
 };
 
+export type LlmConfig = {
+  ollama_host: string;
+  ollama_model: string;
+  groq_configured: boolean;
+  groq_model: string;
+};
+
 export type DashboardStats = {
   subject_count: number;
   document_count: number;
@@ -113,6 +120,10 @@ export async function fetchHealth(): Promise<HealthResponse> {
   return request<HealthResponse>("/health");
 }
 
+export async function fetchLlmConfig(): Promise<LlmConfig> {
+  return request<LlmConfig>("/settings/llm");
+}
+
 export async function fetchSubjects(): Promise<Subject[]> {
   return request<Subject[]>("/subjects");
 }
@@ -124,6 +135,16 @@ export async function fetchDashboardStats(): Promise<DashboardStats> {
 export async function createSubject(name: string): Promise<Subject> {
   return request<Subject>("/subjects", {
     method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ name }),
+  });
+}
+
+export async function updateSubject(subjectId: number, name: string): Promise<Subject> {
+  return request<Subject>(`/subjects/${subjectId}`, {
+    method: "PATCH",
     headers: {
       "Content-Type": "application/json",
     },
@@ -145,6 +166,30 @@ export async function uploadDocument(
   return request<DocumentRecord>(`/subjects/${subjectId}/documents`, {
     method: "POST",
     body,
+  });
+}
+
+export async function deleteSubject(subjectId: number): Promise<{ detail: string }> {
+  return request<{ detail: string }>(`/subjects/${subjectId}`, {
+    method: "DELETE",
+  });
+}
+
+export async function deleteDocument(
+  subjectId: number,
+  documentId: number,
+): Promise<{ detail: string }> {
+  return request<{ detail: string }>(`/subjects/${subjectId}/documents/${documentId}`, {
+    method: "DELETE",
+  });
+}
+
+export async function deleteGeneratedContent(
+  subjectId: number,
+  contentId: number,
+): Promise<{ detail: string }> {
+  return request<{ detail: string }>(`/subjects/${subjectId}/generated/${contentId}`, {
+    method: "DELETE",
   });
 }
 
@@ -178,6 +223,10 @@ export async function generateStudyContent({
 
 export async function fetchGeneratedContent(subjectId: number): Promise<GeneratedContent[]> {
   return request<GeneratedContent[]>(`/subjects/${subjectId}/generated`);
+}
+
+export async function fetchAllGeneratedContent(): Promise<GeneratedContent[]> {
+  return request<GeneratedContent[]>("/subjects/generated/all");
 }
 
 export async function fetchChatHistory(subjectId: number): Promise<ChatHistorySession[]> {
