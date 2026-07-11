@@ -47,6 +47,7 @@ import {
   fetchHealth,
   fetchLlmConfig,
   fetchSubjects,
+  generateExamPrepPack,
   generateStudyContent,
   getDocumentFileUrl,
   getGeneratedExportUrl,
@@ -113,6 +114,7 @@ const studySetCategoryOptions: Array<{ value: StudySetCategoryFilter; label: str
   { value: "flashcard", label: "Flashcards" },
   { value: "short_answer", label: "Short/Long" },
   { value: "topic_prediction", label: "Topics" },
+  { value: "exam_prep", label: "Exam Prep" },
 ];
 
 const statusStyles = {
@@ -868,6 +870,11 @@ function getGeneratedDeleteLabel(content: GeneratedContent): string {
     return `Short/long question set (${questionCount} ${questionCount === 1 ? "question" : "questions"})`;
   }
 
+  if (content.type === "exam_prep") {
+    const topicCount = getArrayLength(payload, "topics_covered");
+    return `Exam prep pack (${topicCount} ${topicCount === 1 ? "topic" : "topics"})`;
+  }
+
   const cardCount = getArrayLength(payload, "cards");
   return `Flashcard set (${cardCount} ${cardCount === 1 ? "card" : "cards"})`;
 }
@@ -1316,7 +1323,7 @@ function StudySetsOverview({
           <p className="font-mono text-xs font-medium uppercase text-accent">Study Sets</p>
           <h1 className="mt-2 text-3xl font-semibold text-text-primary">Generated study content</h1>
           <p className="mt-2 max-w-2xl text-sm leading-6 text-text-secondary">
-            Previously generated summaries, MCQs, flashcards, short/long questions, and predicted topics across all subjects.
+            Previously generated summaries, MCQs, flashcards, short/long questions, predicted topics, and exam prep packs across all subjects.
           </p>
         </div>
         <IconButton ariaLabel="Refresh study sets" icon={RefreshCw} onClick={onRefresh} />
@@ -1409,7 +1416,7 @@ function StudySetsOverview({
           <Layers aria-hidden="true" className="mx-auto h-7 w-7 text-accent" />
           <h2 className="mt-4 text-lg font-semibold text-text-primary">No study sets yet</h2>
           <p className="mx-auto mt-2 max-w-md text-sm leading-6 text-text-secondary">
-            Select a subject to generate summaries, MCQs, flashcards, short/long questions, or predicted topics.
+            Select a subject to generate summaries, MCQs, flashcards, short/long questions, predicted topics, or exam prep packs.
           </p>
           <button
             className="mt-4 inline-flex h-10 items-center gap-2 rounded-lg bg-accent px-4 text-sm font-medium text-white transition duration-150 ease-out hover:-translate-y-px hover:bg-accent-hover hover:shadow-interactive"
@@ -1480,7 +1487,9 @@ function getStudySetFilterEmptyTitle(
             ? "short/long questions"
             : categoryFilter === "topic_prediction"
               ? "predicted topics"
-              : "study sets";
+              : categoryFilter === "exam_prep"
+                ? "exam prep packs"
+                : "study sets";
 
   return subjectName
     ? `No ${categoryLabel} found for ${subjectName}`
@@ -1500,26 +1509,29 @@ function ExamPrepPage({
   const [generatedSets, setGeneratedSets] = useState<GeneratedContentState>({ status: "loading" });
   const [selectedTopicIds, setSelectedTopicIds] = useState<Set<number>>(new Set());
   const [isPredicting, setIsPredicting] = useState(false);
+  const [isGeneratingPack, setIsGeneratingPack] = useState(false);
+  const [examPrepPack, setExamPrepPack] = useState<GeneratedContent | null>(null);
+  const [examPrepAnswers, setExamPrepAnswers] = useState<Record<number, number>>({});
   const [error, setError] = useState<string | null>(null);
 
   const topicContent = isTopicPredictionGeneratedContent(topicSet) ? topicSet.content_json : null;
-  const selectedTopicCount = topicContent
-    ? topicContent.topics.filter((topic) => selectedTopicIds.has(topic.id)).length
-    : 0;
-  const selectedTopicNames = topicContent
-    ? topicContent.topics
-        .filter((topic) => selectedTopicIds.has(topic.id))
-        .map((topic) => topic.name)
+  const selectedTopics = topicContent
+    ? topicContent.topics.filter((topic) => selectedTopicIds.has(topic.id))
     : [];
+  const selectedTopicCount = topicContent
+    ? selectedTopics.length
+    : 0;
+  const selectedChunkIds = getSelectedChunkIdsFromTopics(selectedTopics);
+  const canGeneratePack = Boolean(topicContent) && selectedTopicCount > 0 && selectedChunkIds.length > 0;
 
   useEffect(() => {
     loadTopicPredictions();
   }, [subject.id]);
 
   useEffect(() => {
-    onGenerationChange(isPredicting);
+    onGenerationChange(isPredicting || isGeneratingPack);
     return () => onGenerationChange(false);
-  }, [isPredicting, onGenerationChange]);
+  }, [isGeneratingPack, isPredicting, onGenerationChange]);
 
   function loadTopicPredictions() {
     setGeneratedSets({ status: "loading" });
@@ -1528,12 +1540,17 @@ function ExamPrepPage({
       .then((sets) => {
         setGeneratedSets({ status: "ready", data: sets });
         const latestTopicSet = sets.find(isTopicPredictionGeneratedContent) ?? null;
+        const latestExamPrepPack = sets.find(isExamPrepGeneratedContent) ?? null;
         setTopicSet(latestTopicSet);
+        setExamPrepPack(latestExamPrepPack);
+        setExamPrepAnswers({});
         resetSelectedTopics(latestTopicSet);
       })
       .catch((caughtError: unknown) => {
         setGeneratedSets({ status: "error", message: getMessage(caughtError) });
         setTopicSet(null);
+        setExamPrepPack(null);
+        setExamPrepAnswers({});
         setSelectedTopicIds(new Set());
       });
   }
@@ -1581,8 +1598,43 @@ function ExamPrepPage({
     });
   }
 
-  function logSelectedTopics() {
-    console.info("Selected exam prep topics", selectedTopicNames);
+  async function handleGenerateExamPrepPack() {
+    if (!canGeneratePack) {
+      setError(
+        selectedTopicCount > 0
+          ? "Regenerate predicted topics first so each topic includes source chunk IDs."
+          : "Select at least one topic before generating an exam prep pack.",
+      );
+      return;
+    }
+
+    setIsGeneratingPack(true);
+    setError(null);
+    setExamPrepAnswers({});
+
+    try {
+      console.info("Generating exam prep pack", {
+        selected_chunk_ids: selectedChunkIds,
+        selected_topics: selectedTopics.map((topic) => topic.name),
+      });
+      const result = await generateExamPrepPack({
+        subjectId: subject.id,
+        selectedChunkIds,
+        selectedTopics,
+      });
+      setExamPrepPack(result);
+      setGeneratedSets((current) => {
+        const existing = current.status === "ready" ? current.data : [];
+        return {
+          status: "ready",
+          data: [result, ...existing.filter((item) => item.id !== result.id)],
+        };
+      });
+    } catch (caughtError) {
+      setError(getMessage(caughtError));
+    } finally {
+      setIsGeneratingPack(false);
+    }
   }
 
   return (
@@ -1665,6 +1717,14 @@ function ExamPrepPage({
           {generatedSets.status === "loading" && <DocumentListSkeleton />}
           {generatedSets.status === "error" && <ErrorPanel message={generatedSets.message} />}
           {error && <ErrorPanel message={error} />}
+          {isGeneratingPack && (
+            <div className="mb-4 rounded-lg border border-border bg-surface-alt p-4 text-sm leading-6 text-text-secondary">
+              <p className="font-semibold text-text-primary">Generating exam prep pack</p>
+              <p className="mt-1">
+                This includes a summary, MCQs, and short-answer questions, so it may take a few minutes.
+              </p>
+            </div>
+          )}
           {generatedSets.status === "ready" && !topicContent && !isPredicting && (
             <div className="rounded-lg border border-border bg-surface-alt p-8 text-center">
               <Target aria-hidden="true" className="mx-auto h-7 w-7 text-accent" />
@@ -1717,25 +1777,82 @@ function ExamPrepPage({
         </div>
 
         <div className="mt-5 flex flex-col gap-3 border-t border-border pt-4 md:flex-row md:items-center md:justify-between">
-          <p className="text-sm text-text-secondary">
-            {topicContent
-              ? `${selectedTopicCount} of ${topicContent.topics.length} topics selected`
-              : "No topics selected yet"}
-          </p>
+          <div>
+            <p className="text-sm text-text-secondary">
+              {topicContent
+                ? `${selectedTopicCount} of ${topicContent.topics.length} topics selected`
+                : "No topics selected yet"}
+            </p>
+            {topicContent && selectedTopicCount > 0 && selectedChunkIds.length === 0 && (
+              <p className="mt-1 text-xs font-medium text-warning">
+                Regenerate topics once so this picker can attach source chunk IDs.
+              </p>
+            )}
+          </div>
           <button
             className="inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-accent px-4 text-sm font-medium text-white transition duration-150 ease-out hover:-translate-y-px hover:bg-accent-hover hover:shadow-interactive disabled:cursor-not-allowed disabled:opacity-70"
-            disabled={!topicContent || selectedTopicCount === 0}
-            onClick={logSelectedTopics}
-            title="Exam prep pack generation is coming in the next step."
+            disabled={!canGeneratePack || isGeneratingPack}
+            onClick={handleGenerateExamPrepPack}
+            title={
+              canGeneratePack
+                ? "Generate a combined summary, MCQs, and short/long question pack."
+                : "Select topics with source chunk IDs before generating."
+            }
             type="button"
           >
-            <GraduationCap aria-hidden="true" className="h-4 w-4" />
+            {isGeneratingPack ? (
+              <SkeletonDot className="h-4 w-4" tone="light" />
+            ) : (
+              <GraduationCap aria-hidden="true" className="h-4 w-4" />
+            )}
             Generate Exam Prep Pack
           </button>
         </div>
       </section>
+
+      {isExamPrepGeneratedContent(examPrepPack) && (
+        <section className="rounded-lg border border-border bg-surface p-5">
+          <div className="mb-4 flex flex-col gap-3 border-b border-border pb-4 md:flex-row md:items-center md:justify-between">
+            <div>
+              <p className="text-xs font-medium uppercase text-text-secondary">Latest exam prep pack</p>
+              <h2 className="mt-1 text-lg font-semibold text-text-primary">{examPrepPack.content_json.title}</h2>
+            </div>
+            <GeneratedExportActions content={examPrepPack} subjectId={subject.id} />
+          </div>
+          <ExamPrepViewer
+            answers={examPrepAnswers}
+            content={examPrepPack.content_json}
+            onAnswer={(questionId, optionIndex) =>
+              setExamPrepAnswers((current) => ({ ...current, [questionId]: optionIndex }))
+            }
+          />
+        </section>
+      )}
     </motion.section>
   );
+}
+
+function getSelectedChunkIdsFromTopics(
+  topics: Extract<GeneratedContent["content_json"], { type: "topic_prediction" }>["topics"],
+): number[] {
+  const selected = new Set<number>();
+
+  for (const topic of topics) {
+    for (const sourceChunkId of topic.source_chunk_ids ?? []) {
+      const match = /^chunk_(\d+)$/.exec(sourceChunkId);
+      if (match) {
+        selected.add(Number(match[1]));
+      }
+    }
+
+    for (const citation of topic.citations) {
+      if (typeof citation.chunk_id === "number") {
+        selected.add(citation.chunk_id);
+      }
+    }
+  }
+
+  return [...selected].sort((left, right) => left - right);
 }
 
 function SettingsPage({
@@ -2559,6 +2676,16 @@ function StudyToolsPanel({
             <TopicPredictionViewer content={generated.content_json} />
           )}
 
+          {isExamPrepGeneratedContent(generated) && (
+            <ExamPrepViewer
+              answers={mcqAnswers}
+              content={generated.content_json}
+              onAnswer={(questionId, optionIndex) =>
+                setMcqAnswers((current) => ({ ...current, [questionId]: optionIndex }))
+              }
+            />
+          )}
+
           {generated &&
             !getGeneratedError(generated) &&
             !isRenderableGeneratedContent(generated) && (
@@ -2638,6 +2765,11 @@ function getGeneratedTitle(content: GeneratedContent): string {
     return topicCount === 1 ? "1 predicted topic" : `${topicCount} predicted topics`;
   }
 
+  if (payloadType === "exam_prep") {
+    const topicCount = getArrayLength(payload, "topics_covered");
+    return topicCount === 1 ? "Exam prep pack for 1 topic" : `Exam prep pack for ${topicCount} topics`;
+  }
+
   return "Saved study set";
 }
 
@@ -2652,6 +2784,10 @@ function getGeneratedTypeLabel(type: GenerationType): string {
 
   if (type === "short_answer") {
     return "Short/Long Questions";
+  }
+
+  if (type === "exam_prep") {
+    return "Exam Prep Pack";
   }
 
   return type.charAt(0).toUpperCase() + type.slice(1);
@@ -2724,13 +2860,32 @@ function isTopicPredictionGeneratedContent(
   return getStringField(payload, "type") === "topic_prediction" && Array.isArray(payload.topics);
 }
 
+function isExamPrepGeneratedContent(
+  content: GeneratedContent | null,
+): content is GeneratedContent & {
+  content_json: Extract<GeneratedContent["content_json"], { type: "exam_prep" }>;
+} {
+  const payload = getGeneratedPayload(content);
+  return (
+    getStringField(payload, "type") === "exam_prep" &&
+    Array.isArray(payload.topics_covered) &&
+    payload.summary !== null &&
+    typeof payload.summary === "object" &&
+    payload.mcqs !== null &&
+    typeof payload.mcqs === "object" &&
+    payload.short_answer_questions !== null &&
+    typeof payload.short_answer_questions === "object"
+  );
+}
+
 function isRenderableGeneratedContent(content: GeneratedContent | null): boolean {
   return (
     isSummaryGeneratedContent(content) ||
     isMcqGeneratedContent(content) ||
     isFlashcardGeneratedContent(content) ||
     isShortAnswerGeneratedContent(content) ||
-    isTopicPredictionGeneratedContent(content)
+    isTopicPredictionGeneratedContent(content) ||
+    isExamPrepGeneratedContent(content)
   );
 }
 
@@ -3097,6 +3252,66 @@ function TopicPredictionViewer({
           </section>
         ))}
       </div>
+    </div>
+  );
+}
+
+function ExamPrepViewer({
+  answers,
+  content,
+  onAnswer,
+}: {
+  answers: Record<number, number>;
+  content: Extract<GeneratedContent["content_json"], { type: "exam_prep" }>;
+  onAnswer: (questionId: number, optionIndex: number) => void;
+}) {
+  return (
+    <div className="space-y-6">
+      <section className="rounded-lg border border-border bg-surface-alt p-4">
+        <div className="flex items-center gap-2">
+          <Target aria-hidden="true" className="h-4 w-4 text-accent" />
+          <h3 className="text-sm font-semibold text-text-primary">Topics Covered</h3>
+        </div>
+        {content.topics_covered.length === 0 ? (
+          <p className="mt-3 text-sm text-text-secondary">
+            No matching saved topic metadata was found for this pack.
+          </p>
+        ) : (
+          <div className="mt-4 space-y-3">
+            {content.topics_covered.map((topic) => (
+              <section className="rounded-lg border border-border bg-surface p-3" key={topic.id}>
+                <h4 className="text-sm font-semibold text-text-primary">{topic.name}</h4>
+                <p className="mt-2 text-sm leading-6 text-text-secondary">{topic.reason}</p>
+                <CitationList citations={topic.citations} />
+              </section>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <section>
+        <div className="mb-3 flex items-center gap-2">
+          <FileText aria-hidden="true" className="h-4 w-4 text-accent" />
+          <h3 className="text-sm font-semibold text-text-primary">Summary</h3>
+        </div>
+        <SummaryViewer content={content.summary} />
+      </section>
+
+      <section>
+        <div className="mb-3 flex items-center gap-2">
+          <ListChecks aria-hidden="true" className="h-4 w-4 text-accent" />
+          <h3 className="text-sm font-semibold text-text-primary">MCQs</h3>
+        </div>
+        <McqViewer answers={answers} content={content.mcqs} onAnswer={onAnswer} />
+      </section>
+
+      <section>
+        <div className="mb-3 flex items-center gap-2">
+          <GraduationCap aria-hidden="true" className="h-4 w-4 text-accent" />
+          <h3 className="text-sm font-semibold text-text-primary">Short/Long Questions</h3>
+        </div>
+        <ShortAnswerViewer content={content.short_answer_questions} />
+      </section>
     </div>
   );
 }

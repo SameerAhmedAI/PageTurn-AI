@@ -6,7 +6,7 @@ from json_repair import repair_json
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import Chunk
+from app.models import Chunk, GeneratedContent
 from app.services.indexing import RetrievedChunk, retrieve_chunks
 from app.services.llm import try_groq, try_ollama
 
@@ -20,6 +20,8 @@ Return ONLY valid JSON. Do not include markdown fences, preamble, comments, or t
 Task:
 Condense the retrieved chunks into a structured summary with headings and bullet points.
 Each bullet MUST include the source_chunk_id of the chunk it came from.
+If Topic is not "Entire subject", summarize ONLY that topic and ignore unrelated material even if it appears in the chunks.
+{scope_instruction}
 
 JSON schema:
 {{
@@ -49,6 +51,8 @@ Task:
 Generate exactly {count} multiple-choice questions from the retrieved chunks.
 Each question must have exactly 4 options, one correct answer, a short explanation, and source_chunk_id for the chunk used.
 The correct_index must be an integer from 0 to 3.
+If Topic is not "Entire subject", write questions ONLY about that topic and ignore unrelated material even if it appears in the chunks.
+{scope_instruction}
 
 JSON schema:
 {{
@@ -105,6 +109,8 @@ Short questions should expect 1-2 sentence answers.
 Long questions should expect paragraph or multi-point answers.
 Each question must include an answer_guide and source_chunk_id for the chunk used.
 The difficulty must be exactly "short" or "long".
+If Topic is not "Entire subject", write questions ONLY about that topic and ignore unrelated material even if it appears in the chunks.
+{scope_instruction}
 
 JSON schema:
 {{
@@ -168,7 +174,7 @@ def generate_study_content(
             selected_chunk_ids=selected_chunk_ids,
         )
 
-    retrieved = get_generation_context(db, subject_id, topic)
+    retrieved = get_generation_context(db, subject_id, topic, selected_chunk_ids=selected_chunk_ids)
     if not retrieved:
         return {
             "type": content_type,
@@ -193,6 +199,132 @@ def generate_study_content(
     raise ValueError(f"Unsupported generation type: {content_type}")
 
 
+def generate_exam_prep_pack(
+    db: Session,
+    subject_id: int,
+    selected_chunk_ids: list[int],
+    selected_topics: list[dict] | None = None,
+) -> dict:
+    normalized_chunk_ids = sorted({chunk_id for chunk_id in selected_chunk_ids if chunk_id > 0})
+    if not normalized_chunk_ids:
+        raise ValueError("Exam prep generation requires at least one selected chunk.")
+
+    logger.warning(
+        "Exam prep generation scoped to selected_chunk_ids=%s for subject_id=%s",
+        normalized_chunk_ids,
+        subject_id,
+    )
+    topics_covered = normalize_selected_topics(selected_topics)
+    if not topics_covered:
+        topics_covered = get_topics_for_selected_chunks(db, subject_id, normalized_chunk_ids)
+
+    focus_topic = build_exam_prep_focus_topic(topics_covered)
+
+    try:
+        summary = generate_study_content(
+            db=db,
+            subject_id=subject_id,
+            content_type="summary",
+            topic=focus_topic,
+            count=6,
+            selected_chunk_ids=normalized_chunk_ids,
+        )
+        ensure_generation_success(summary, "summary")
+    except Exception as exc:
+        raise RuntimeError(f"Exam prep generation failed: summary generation failed: {exc}") from exc
+
+    try:
+        mcqs = generate_study_content(
+            db=db,
+            subject_id=subject_id,
+            content_type="mcq",
+            topic=focus_topic,
+            count=8,
+            selected_chunk_ids=normalized_chunk_ids,
+        )
+        ensure_generation_success(mcqs, "MCQ")
+    except Exception as exc:
+        raise RuntimeError(f"Exam prep generation failed: MCQ generation failed: {exc}") from exc
+
+    try:
+        short_answer_questions = generate_short_answer_questions(
+            db=db,
+            subject_id=subject_id,
+            topic=focus_topic,
+            count=6,
+            selected_chunk_ids=normalized_chunk_ids,
+        )
+        ensure_generation_success(short_answer_questions, "short/long question")
+    except Exception as exc:
+        raise RuntimeError(
+            f"Exam prep generation failed: short/long question generation failed: {exc}"
+        ) from exc
+
+    return {
+        "type": "exam_prep",
+        "topic": None,
+        "title": "Exam prep pack",
+        "selected_chunk_ids": normalized_chunk_ids,
+        "topics_covered": topics_covered,
+        "summary": summary,
+        "mcqs": mcqs,
+        "short_answer_questions": short_answer_questions,
+    }
+
+
+def ensure_generation_success(content: dict, label: str) -> None:
+    error = content.get("error")
+    if isinstance(error, str) and error:
+        raise RuntimeError(f"{label} generation failed: {error}")
+
+
+def normalize_selected_topics(selected_topics: list[dict] | None) -> list[dict]:
+    if not selected_topics:
+        return []
+
+    normalized = []
+    for topic in selected_topics:
+        if not isinstance(topic, dict):
+            continue
+
+        name = coerce_string(topic.get("name"), "")
+        reason = coerce_string(topic.get("reason"), "")
+        if not name:
+            continue
+
+        source_chunk_ids = topic.get("source_chunk_ids")
+        if not isinstance(source_chunk_ids, list):
+            source_chunk_ids = []
+
+        citations = topic.get("citations")
+        if not isinstance(citations, list):
+            citations = []
+
+        topic_id = topic.get("id")
+        normalized.append(
+            {
+                "id": topic_id if isinstance(topic_id, int) else len(normalized) + 1,
+                "name": name,
+                "reason": reason,
+                "source_chunk_ids": [
+                    source_id for source_id in source_chunk_ids if isinstance(source_id, str)
+                ],
+                "citations": [citation for citation in citations if isinstance(citation, dict)],
+            }
+        )
+
+    return normalized
+
+
+def build_exam_prep_focus_topic(topics_covered: list[dict]) -> str | None:
+    names = [coerce_string(topic.get("name"), "") for topic in topics_covered]
+    names = [name for name in names if name]
+    if not names:
+        return None
+
+    return "Selected exam prep topics: " + "; ".join(names)
+
+
 def generate_short_answer_questions(
     db: Session,
     subject_id: int,
@@ -214,9 +346,11 @@ def generate_short_answer_questions(
         }
 
     source_chunks = build_source_chunk_map(retrieved)
+    topic_text = topic.strip() if topic and topic.strip() else "Entire subject"
     prompt = SHORT_ANSWER_PROMPT_TEMPLATE.format(
-        topic=topic.strip() if topic and topic.strip() else "Entire subject",
+        topic=topic_text,
         count=count,
+        scope_instruction=build_scope_instruction(topic_text),
         context=build_context_block(source_chunks),
     )
     raw_response = call_generation_llm(prompt)
@@ -252,7 +386,11 @@ def get_generation_context(
     subject_id: int,
     topic: str | None,
     top_k: int = 8,
+    selected_chunk_ids: list[int] | None = None,
 ) -> list[RetrievedChunk]:
+    if selected_chunk_ids:
+        return get_selected_chunk_context(db, subject_id, selected_chunk_ids)
+
     if topic and topic.strip():
         return retrieve_chunks(db, subject_id, topic.strip(), top_k)
 
@@ -272,17 +410,83 @@ def get_short_answer_context(
     selected_chunk_ids: list[int] | None,
 ) -> list[RetrievedChunk]:
     if selected_chunk_ids:
-        statement = (
-            select(Chunk)
-            .where(Chunk.subject_id == subject_id, Chunk.id.in_(selected_chunk_ids))
-            .order_by(Chunk.document_id, Chunk.page_number, Chunk.chunk_index)
-        )
-        return [RetrievedChunk(chunk=chunk, score=1.0) for chunk in db.scalars(statement)]
+        return get_selected_chunk_context(db, subject_id, selected_chunk_ids)
 
     if topic and topic.strip():
         return get_generation_context(db, subject_id, topic, top_k=8)
 
     return get_subject_representative_context(db, subject_id, max_chunks=12)
+
+
+def get_selected_chunk_context(
+    db: Session,
+    subject_id: int,
+    selected_chunk_ids: list[int],
+) -> list[RetrievedChunk]:
+    logger.warning(
+        "Retrieving selected chunks for generation: subject_id=%s selected_chunk_ids=%s",
+        subject_id,
+        selected_chunk_ids,
+    )
+    statement = (
+        select(Chunk)
+        .where(Chunk.subject_id == subject_id, Chunk.id.in_(selected_chunk_ids))
+        .order_by(Chunk.document_id, Chunk.page_number, Chunk.chunk_index)
+    )
+    chunks = list(db.scalars(statement))
+    logger.warning(
+        "Selected chunk retrieval returned chunk_ids=%s for subject_id=%s",
+        [chunk.id for chunk in chunks],
+        subject_id,
+    )
+    return [RetrievedChunk(chunk=chunk, score=1.0) for chunk in chunks]
+
+
+def get_topics_for_selected_chunks(
+    db: Session,
+    subject_id: int,
+    selected_chunk_ids: list[int],
+) -> list[dict]:
+    statement = (
+        select(GeneratedContent)
+        .where(
+            GeneratedContent.subject_id == subject_id,
+            GeneratedContent.type == "topic_prediction",
+        )
+        .order_by(GeneratedContent.created_at.desc(), GeneratedContent.id.desc())
+        .limit(1)
+    )
+    generated = db.scalar(statement)
+    if generated is None:
+        return []
+
+    try:
+        content = json.loads(generated.content_json)
+    except json.JSONDecodeError:
+        logger.warning("Saved topic_prediction %s contains invalid JSON.", generated.id)
+        return []
+
+    selected_source_ids = {f"chunk_{chunk_id}" for chunk_id in selected_chunk_ids}
+    covered_topics = []
+    for topic in content.get("topics", []):
+        if not isinstance(topic, dict):
+            continue
+
+        source_chunk_ids = topic.get("source_chunk_ids")
+        if not isinstance(source_chunk_ids, list):
+            continue
+
+        topic_source_ids = {
+            source_chunk_id
+            for source_chunk_id in source_chunk_ids
+            if isinstance(source_chunk_id, str)
+        }
+        if topic_source_ids.isdisjoint(selected_source_ids):
+            continue
+
+        covered_topics.append(topic)
+
+    return covered_topics
 
 
 def get_subject_representative_context(
@@ -360,20 +564,49 @@ def build_generation_prompt(
 ) -> str:
     context = build_context_block(source_chunks)
     topic_text = topic.strip() if topic and topic.strip() else "Entire subject"
+    scope_instruction = build_scope_instruction(topic_text)
 
     if content_type == "summary":
-        return SUMMARY_PROMPT_TEMPLATE.format(topic=topic_text, count=count, context=context)
+        return SUMMARY_PROMPT_TEMPLATE.format(
+            topic=topic_text,
+            count=count,
+            scope_instruction=scope_instruction,
+            context=context,
+        )
 
     if content_type == "mcq":
-        return MCQ_PROMPT_TEMPLATE.format(topic=topic_text, count=count, context=context)
+        return MCQ_PROMPT_TEMPLATE.format(
+            topic=topic_text,
+            count=count,
+            scope_instruction=scope_instruction,
+            context=context,
+        )
 
     if content_type == "flashcard":
         return FLASHCARD_PROMPT_TEMPLATE.format(topic=topic_text, count=count, context=context)
 
     if content_type == "short_answer":
-        return SHORT_ANSWER_PROMPT_TEMPLATE.format(topic=topic_text, count=count, context=context)
+        return SHORT_ANSWER_PROMPT_TEMPLATE.format(
+            topic=topic_text,
+            count=count,
+            scope_instruction=scope_instruction,
+            context=context,
+        )
 
     raise ValueError(f"Unsupported generation type: {content_type}")
+
+
+def build_scope_instruction(topic_text: str) -> str:
+    if topic_text == "Entire subject":
+        return "Scope rule: The full subject is in scope."
+
+    return (
+        "Scope rule: Treat the Topic line as the complete allowed scope. "
+        "Every generated item must be directly about one of those selected topic names. "
+        "If a concept appears in the chunks but is not one of the selected topics, ignore it. "
+        "Before returning each question or bullet, verify that it belongs to the selected topics; "
+        "discard and replace anything outside that scope."
+    )
 
 
 def build_context_block(source_chunks: dict[str, Chunk]) -> str:
@@ -656,6 +889,11 @@ def normalize_important_topics(parsed: dict, source_chunks: dict[str, Chunk], co
                 "id": len(normalized_topics) + 1,
                 "name": name,
                 "reason": reason,
+                "source_chunk_ids": [
+                    source_chunk_id
+                    for source_chunk_id in source_chunk_ids
+                    if isinstance(source_chunk_id, str) and source_chunk_id in source_chunks
+                ],
                 "citations": unique_citations(citations),
             }
         )
@@ -689,6 +927,7 @@ def get_source_chunk_id(chunk: Chunk) -> str:
 
 def citation_payload(chunk: Chunk) -> dict:
     return {
+        "chunk_id": chunk.id,
         "document_id": chunk.document_id,
         "filename": chunk.document.filename,
         "page_number": chunk.page_number,

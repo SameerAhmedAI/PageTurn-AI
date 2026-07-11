@@ -78,6 +78,53 @@ def generated_content_to_markdown(content: dict) -> str:
             append_citations(lines, topic.get("citations", []))
         return "\n".join(lines).strip() + "\n"
 
+    if content_type == "exam_prep":
+        lines.extend(["## Topics Covered", ""])
+        for topic in content.get("topics_covered", []):
+            lines.append(f"- {topic.get('name', 'Topic')}: {topic.get('reason', '')}")
+        lines.append("")
+
+        summary = content.get("summary", {})
+        if isinstance(summary, dict):
+            lines.extend(["## Summary", ""])
+            for section in summary.get("sections", []):
+                lines.extend([f"### {section.get('heading', 'Section')}", ""])
+                for bullet in section.get("bullets", []):
+                    lines.append(f"- {bullet}")
+                lines.append("")
+            append_citations(lines, summary.get("citations", []))
+
+        mcqs = content.get("mcqs", {})
+        if isinstance(mcqs, dict):
+            lines.extend(["## MCQs", ""])
+            for question in mcqs.get("questions", []):
+                lines.extend([f"### Question {question.get('id')}", "", str(question.get("question", "")), ""])
+                correct_index = question.get("correct_index")
+                for index, option in enumerate(question.get("options", [])):
+                    marker = " (correct)" if index == correct_index else ""
+                    lines.append(f"- {option}{marker}")
+                lines.extend(["", f"Explanation: {question.get('explanation', '')}", ""])
+                append_citations(lines, [question.get("citation")])
+
+        short_answers = content.get("short_answer_questions", {})
+        if isinstance(short_answers, dict):
+            lines.extend(["## Short/Long Questions", ""])
+            for question in short_answers.get("questions", []):
+                difficulty = str(question.get("difficulty", "short")).title()
+                lines.extend(
+                    [
+                        f"### {difficulty} Question {question.get('id')}",
+                        "",
+                        str(question.get("question", "")),
+                        "",
+                        f"Answer guide: {question.get('answer_guide', '')}",
+                        "",
+                    ]
+                )
+                append_citations(lines, [question.get("citation")])
+
+        return "\n".join(lines).strip() + "\n"
+
     lines.append("Unsupported generated content shape.")
     return "\n".join(lines).strip() + "\n"
 

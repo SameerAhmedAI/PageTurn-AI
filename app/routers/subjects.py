@@ -18,6 +18,7 @@ from app.schemas import (
     CitationRead,
     DashboardStatsRead,
     DocumentRead,
+    ExamPrepRequest,
     GeneratedContentRead,
     GenerateRequest,
     SubjectCreate,
@@ -25,7 +26,7 @@ from app.schemas import (
     SubjectUpdate,
 )
 from app.services.export import generated_content_to_markdown, generated_content_to_pdf_bytes
-from app.services.generation import generate_important_topics, generate_study_content
+from app.services.generation import generate_exam_prep_pack, generate_important_topics, generate_study_content
 from app.services.indexing import delete_document_vectors, delete_subject_collection, retrieve_chunks
 from app.services.llm import generate_answer
 from app.services.pdf_processing import process_pdf_document
@@ -255,16 +256,7 @@ def list_generated_content(
         .order_by(GeneratedContent.created_at.desc(), GeneratedContent.id.desc())
     )
 
-    return [
-        GeneratedContentRead(
-            id=content.id,
-            subject_id=content.subject_id,
-            type=content.type,
-            content_json=json.loads(content.content_json),
-            created_at=content.created_at,
-        )
-        for content in db.scalars(statement).all()
-    ]
+    return [generated_content_read(content, db) for content in db.scalars(statement).all()]
 
 
 @router.delete("/{subject_id}/generated/{content_id}")
@@ -290,16 +282,7 @@ def list_all_generated_content(db: Session = Depends(get_db)) -> list[GeneratedC
         GeneratedContent.id.desc(),
     )
 
-    return [
-        GeneratedContentRead(
-            id=content.id,
-            subject_id=content.subject_id,
-            type=content.type,
-            content_json=json.loads(content.content_json),
-            created_at=content.created_at,
-        )
-        for content in db.scalars(statement).all()
-    ]
+    return [generated_content_read(content, db) for content in db.scalars(statement).all()]
 
 
 @router.get("/{subject_id}/export/{content_id}")
@@ -334,6 +317,91 @@ def export_generated_content(
         )
 
     raise HTTPException(status_code=400, detail="Export format must be markdown or pdf.")
+
+
+def generated_content_read(content: GeneratedContent, db: Session) -> GeneratedContentRead:
+    content_json = json.loads(content.content_json)
+    enrich_topic_prediction_sources(content_json, db, content.subject_id)
+
+    return GeneratedContentRead(
+        id=content.id,
+        subject_id=content.subject_id,
+        type=content.type,
+        content_json=content_json,
+        created_at=content.created_at,
+    )
+
+
+def enrich_topic_prediction_sources(content_json: dict, db: Session, subject_id: int) -> None:
+    if content_json.get("type") != "topic_prediction":
+        return
+
+    topics = content_json.get("topics")
+    if not isinstance(topics, list):
+        return
+
+    for topic in topics:
+        if not isinstance(topic, dict):
+            continue
+
+        existing_source_ids = topic.get("source_chunk_ids")
+        source_ids = [
+            source_id
+            for source_id in existing_source_ids
+            if isinstance(source_id, str)
+        ] if isinstance(existing_source_ids, list) else []
+
+        citations = topic.get("citations")
+        if not isinstance(citations, list):
+            topic["source_chunk_ids"] = source_ids
+            continue
+
+        for citation in citations:
+            if not isinstance(citation, dict):
+                continue
+
+            chunk_id = citation.get("chunk_id")
+            if not isinstance(chunk_id, int):
+                chunk = find_chunk_for_citation(db, subject_id, citation)
+                if chunk is None:
+                    continue
+
+                chunk_id = chunk.id
+                citation["chunk_id"] = chunk_id
+
+            source_id = f"chunk_{chunk_id}"
+            if source_id not in source_ids:
+                source_ids.append(source_id)
+
+        topic["source_chunk_ids"] = source_ids
+
+
+def find_chunk_for_citation(db: Session, subject_id: int, citation: dict) -> Chunk | None:
+    document_id = citation.get("document_id")
+    page_number = citation.get("page_number")
+    if not isinstance(document_id, int) or not isinstance(page_number, int):
+        return None
+
+    statement = (
+        select(Chunk)
+        .where(
+            Chunk.subject_id == subject_id,
+            Chunk.document_id == document_id,
+            Chunk.page_number == page_number,
+        )
+        .order_by(Chunk.chunk_index)
+    )
+    chunks = list(db.scalars(statement).all())
+    if not chunks:
+        return None
+
+    chunk_text = citation.get("chunk_text")
+    if isinstance(chunk_text, str) and chunk_text:
+        for chunk in chunks:
+            if chunk.content.startswith(chunk_text[:120]) or chunk_text.startswith(chunk.content[:120]):
+                return chunk
+
+    return chunks[0]
 
 
 @router.get("/document-files/{document_id}")
@@ -405,6 +473,50 @@ def predict_topics_for_subject(
     generated = GeneratedContent(
         subject_id=subject_id,
         type="topic_prediction",
+        content_json=json.dumps(content),
+    )
+    db.add(generated)
+    db.commit()
+    db.refresh(generated)
+
+    return GeneratedContentRead(
+        id=generated.id,
+        subject_id=generated.subject_id,
+        type=generated.type,
+        content_json=content,
+        created_at=generated.created_at,
+    )
+
+
+@router.post("/{subject_id}/exam-prep", response_model=GeneratedContentRead)
+def generate_exam_prep_for_subject(
+    subject_id: int,
+    payload: ExamPrepRequest,
+    db: Session = Depends(get_db),
+) -> GeneratedContentRead:
+    subject = db.get(Subject, subject_id)
+    if subject is None:
+        raise HTTPException(status_code=404, detail="Subject not found.")
+
+    logger.warning(
+        "Exam prep request received: subject_id=%s selected_chunk_ids=%s selected_topic_names=%s",
+        subject_id,
+        payload.selected_chunk_ids,
+        [
+            topic.get("name")
+            for topic in (payload.selected_topics or [])
+            if isinstance(topic, dict)
+        ],
+    )
+    content = generate_exam_prep_pack(
+        db=db,
+        subject_id=subject_id,
+        selected_chunk_ids=payload.selected_chunk_ids,
+        selected_topics=payload.selected_topics,
+    )
+    generated = GeneratedContent(
+        subject_id=subject_id,
+        type="exam_prep",
         content_json=json.dumps(content),
     )
     db.add(generated)

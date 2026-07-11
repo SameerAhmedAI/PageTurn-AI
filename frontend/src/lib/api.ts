@@ -27,6 +27,7 @@ export type DocumentRecord = {
 export type ExplanationMode = "simple" | "university";
 
 export type Citation = {
+  chunk_id?: number;
   document_id: number;
   filename: string;
   page_number: number;
@@ -38,7 +39,8 @@ export type GenerationType =
   | "mcq"
   | "flashcard"
   | "short_answer"
-  | "topic_prediction";
+  | "topic_prediction"
+  | "exam_prep";
 
 export type SummaryContent = {
   type: "summary";
@@ -100,8 +102,21 @@ export type TopicPredictionContent = {
     id: number;
     name: string;
     reason: string;
+    source_chunk_ids?: string[];
     citations: Citation[];
   }>;
+  error?: string;
+};
+
+export type ExamPrepContent = {
+  type: "exam_prep";
+  topic: null;
+  title: string;
+  selected_chunk_ids: number[];
+  topics_covered: TopicPredictionContent["topics"];
+  summary: SummaryContent;
+  mcqs: McqContent;
+  short_answer_questions: ShortAnswerContent;
   error?: string;
 };
 
@@ -110,7 +125,8 @@ export type GeneratedContentPayload =
   | McqContent
   | FlashcardContent
   | ShortAnswerContent
-  | TopicPredictionContent;
+  | TopicPredictionContent
+  | ExamPrepContent;
 
 export type GeneratedContent = {
   id: number;
@@ -264,6 +280,41 @@ export async function predictImportantTopics(subjectId: number): Promise<Generat
   return request<GeneratedContent>(`/subjects/${subjectId}/predict-topics`, {
     method: "POST",
   });
+}
+
+export async function generateExamPrepPack({
+  selectedChunkIds,
+  selectedTopics,
+  subjectId,
+}: {
+  subjectId: number;
+  selectedChunkIds: number[];
+  selectedTopics: TopicPredictionContent["topics"];
+}): Promise<GeneratedContent> {
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), 300000);
+
+  try {
+    return await request<GeneratedContent>(`/subjects/${subjectId}/exam-prep`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        selected_chunk_ids: selectedChunkIds,
+        selected_topics: selectedTopics,
+      }),
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new Error("Exam prep generation timed out after 5 minutes. Try fewer topics or check the LLM provider.");
+    }
+
+    throw error;
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
 }
 
 export async function fetchGeneratedContent(subjectId: number): Promise<GeneratedContent[]> {

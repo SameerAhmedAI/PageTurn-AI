@@ -54,6 +54,11 @@ class GenerateRequest(BaseModel):
     selected_chunk_ids: list[int] | None = None
 
 
+class ExamPrepRequest(BaseModel):
+    selected_chunk_ids: list[int] = Field(min_length=1)
+    selected_topics: list[dict] | None = None
+
+
 class GeneratedContentRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
