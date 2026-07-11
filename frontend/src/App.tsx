@@ -25,6 +25,7 @@ import {
   Send,
   Settings,
   Sun,
+  Target,
   Trash2,
   Upload,
   X,
@@ -49,6 +50,7 @@ import {
   generateStudyContent,
   getDocumentFileUrl,
   getGeneratedExportUrl,
+  predictImportantTopics,
   streamChatAnswer,
   uploadDocument,
   updateSubject,
@@ -109,6 +111,8 @@ const studySetCategoryOptions: Array<{ value: StudySetCategoryFilter; label: str
   { value: "summary", label: "Summary" },
   { value: "mcq", label: "MCQs" },
   { value: "flashcard", label: "Flashcards" },
+  { value: "short_answer", label: "Short/Long" },
+  { value: "topic_prediction", label: "Topics" },
 ];
 
 const statusStyles = {
@@ -128,7 +132,17 @@ const statusIcons = {
 };
 
 const sidebarListScrollClass =
-  "mt-3 max-h-80 space-y-2 overflow-y-auto pr-1 [scrollbar-color:var(--color-border)_transparent] [scrollbar-width:thin] [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-border [&::-webkit-scrollbar-track]:bg-transparent";
+  "mt-3 min-h-0 flex-1 space-y-2 overflow-y-auto pr-1 [scrollbar-color:var(--color-border)_transparent] [scrollbar-width:thin] [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-border [&::-webkit-scrollbar-track]:bg-transparent";
+const chatGridClass =
+  "mt-5 grid h-[clamp(30rem,calc(100vh-13rem),46rem)] min-h-0 gap-4 lg:grid-cols-[18rem_1fr]";
+const chatThreadScrollClass =
+  "min-h-0 flex-1 space-y-4 overflow-y-auto rounded-lg border border-border bg-surface-alt p-4 pr-2 [scrollbar-color:var(--color-border)_transparent] [scrollbar-width:thin] [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-border [&::-webkit-scrollbar-track]:bg-transparent";
+const studyToolsGridClass =
+  "mt-5 grid h-[clamp(30rem,calc(100vh-12rem),46rem)] min-h-0 grid-rows-[minmax(0,1fr)_minmax(0,1fr)] gap-4 lg:grid-cols-[18rem_1fr] lg:grid-rows-1";
+const studyToolsColumnScrollClass =
+  "h-full min-h-0 overflow-y-auto [scrollbar-color:var(--color-border)_transparent] [scrollbar-width:thin] [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-border [&::-webkit-scrollbar-track]:bg-transparent";
+const generatedListScrollClass =
+  "mt-3 min-h-0 flex-1 space-y-2 overflow-y-auto pr-1 [scrollbar-color:var(--color-border)_transparent] [scrollbar-width:thin] [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-border [&::-webkit-scrollbar-track]:bg-transparent";
 
 export default function App() {
   const [theme, setTheme] = useState<"light" | "dark">(() => getInitialTheme());
@@ -628,7 +642,29 @@ export default function App() {
                 subjects={subjects}
               />
             ) : activeView === "examPrep" ? (
-              <ComingSoonPage key="exam-prep-page" onSubjects={() => handleNav("subjects")} />
+              selectedSubject ? (
+                <ExamPrepPage
+                  key={`exam-prep-page-${selectedSubject.id}`}
+                  onGenerationChange={setIsStudyGenerating}
+                  onSubjects={() => handleNav("subjects")}
+                  subject={selectedSubject}
+                />
+              ) : (
+                <SubjectPickerPage
+                  actionLabel="Exam prep"
+                  description="Exam prep starts with predicted important topics for one subject. Pick a subject to choose the focus areas."
+                  emptyMessage="Create a subject before preparing an exam pack."
+                  icon={GraduationCap}
+                  key="exam-prep-picker"
+                  onSelect={(subjectId) => {
+                    setSelectedSubjectId(subjectId);
+                    setActiveView("examPrep");
+                  }}
+                  onSubjects={() => handleNav("subjects")}
+                  subjects={subjects}
+                  title="Select a subject for exam prep"
+                />
+              )
             ) : (
               <SettingsPage
                 key="settings-page"
@@ -820,6 +856,16 @@ function getGeneratedDeleteLabel(content: GeneratedContent): string {
   if (content.type === "mcq") {
     const questionCount = getArrayLength(payload, "questions");
     return `MCQ set (${questionCount} ${questionCount === 1 ? "question" : "questions"})`;
+  }
+
+  if (content.type === "topic_prediction") {
+    const topicCount = getArrayLength(payload, "topics");
+    return `Predicted topics (${topicCount} ${topicCount === 1 ? "topic" : "topics"})`;
+  }
+
+  if (content.type === "short_answer") {
+    const questionCount = getArrayLength(payload, "questions");
+    return `Short/long question set (${questionCount} ${questionCount === 1 ? "question" : "questions"})`;
   }
 
   const cardCount = getArrayLength(payload, "cards");
@@ -1270,7 +1316,7 @@ function StudySetsOverview({
           <p className="font-mono text-xs font-medium uppercase text-accent">Study Sets</p>
           <h1 className="mt-2 text-3xl font-semibold text-text-primary">Generated study content</h1>
           <p className="mt-2 max-w-2xl text-sm leading-6 text-text-secondary">
-            Previously generated summaries, MCQs, and flashcards across all subjects.
+            Previously generated summaries, MCQs, flashcards, short/long questions, and predicted topics across all subjects.
           </p>
         </div>
         <IconButton ariaLabel="Refresh study sets" icon={RefreshCw} onClick={onRefresh} />
@@ -1363,7 +1409,7 @@ function StudySetsOverview({
           <Layers aria-hidden="true" className="mx-auto h-7 w-7 text-accent" />
           <h2 className="mt-4 text-lg font-semibold text-text-primary">No study sets yet</h2>
           <p className="mx-auto mt-2 max-w-md text-sm leading-6 text-text-secondary">
-            Select a subject to generate summaries, MCQs, or flashcards.
+            Select a subject to generate summaries, MCQs, flashcards, short/long questions, or predicted topics.
           </p>
           <button
             className="mt-4 inline-flex h-10 items-center gap-2 rounded-lg bg-accent px-4 text-sm font-medium text-white transition duration-150 ease-out hover:-translate-y-px hover:bg-accent-hover hover:shadow-interactive"
@@ -1399,7 +1445,7 @@ function GeneratedOverviewCard({
           type="button"
         >
           <p className="text-xs font-medium uppercase text-text-secondary">{subjectName}</p>
-          <h2 className="mt-2 text-sm font-semibold capitalize text-text-primary">{item.type}</h2>
+          <h2 className="mt-2 text-sm font-semibold text-text-primary">{getGeneratedTypeLabel(item.type)}</h2>
           <p className="mt-1 line-clamp-2 text-sm text-text-secondary">{getGeneratedTitle(item)}</p>
           <p className="mt-3 text-xs text-text-secondary">
             {new Date(item.created_at).toLocaleString()}
@@ -1430,14 +1476,115 @@ function getStudySetFilterEmptyTitle(
         ? "MCQs"
         : categoryFilter === "flashcard"
           ? "flashcards"
-          : "study sets";
+          : categoryFilter === "short_answer"
+            ? "short/long questions"
+            : categoryFilter === "topic_prediction"
+              ? "predicted topics"
+              : "study sets";
 
   return subjectName
     ? `No ${categoryLabel} found for ${subjectName}`
     : `No ${categoryLabel} found`;
 }
 
-function ComingSoonPage({ onSubjects }: { onSubjects: () => void }) {
+function ExamPrepPage({
+  onGenerationChange,
+  onSubjects,
+  subject,
+}: {
+  onGenerationChange: (active: boolean) => void;
+  onSubjects: () => void;
+  subject: Subject;
+}) {
+  const [topicSet, setTopicSet] = useState<GeneratedContent | null>(null);
+  const [generatedSets, setGeneratedSets] = useState<GeneratedContentState>({ status: "loading" });
+  const [selectedTopicIds, setSelectedTopicIds] = useState<Set<number>>(new Set());
+  const [isPredicting, setIsPredicting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const topicContent = isTopicPredictionGeneratedContent(topicSet) ? topicSet.content_json : null;
+  const selectedTopicCount = topicContent
+    ? topicContent.topics.filter((topic) => selectedTopicIds.has(topic.id)).length
+    : 0;
+  const selectedTopicNames = topicContent
+    ? topicContent.topics
+        .filter((topic) => selectedTopicIds.has(topic.id))
+        .map((topic) => topic.name)
+    : [];
+
+  useEffect(() => {
+    loadTopicPredictions();
+  }, [subject.id]);
+
+  useEffect(() => {
+    onGenerationChange(isPredicting);
+    return () => onGenerationChange(false);
+  }, [isPredicting, onGenerationChange]);
+
+  function loadTopicPredictions() {
+    setGeneratedSets({ status: "loading" });
+    setError(null);
+    fetchGeneratedContent(subject.id)
+      .then((sets) => {
+        setGeneratedSets({ status: "ready", data: sets });
+        const latestTopicSet = sets.find(isTopicPredictionGeneratedContent) ?? null;
+        setTopicSet(latestTopicSet);
+        resetSelectedTopics(latestTopicSet);
+      })
+      .catch((caughtError: unknown) => {
+        setGeneratedSets({ status: "error", message: getMessage(caughtError) });
+        setTopicSet(null);
+        setSelectedTopicIds(new Set());
+      });
+  }
+
+  function resetSelectedTopics(nextTopicSet: GeneratedContent | null) {
+    if (!isTopicPredictionGeneratedContent(nextTopicSet)) {
+      setSelectedTopicIds(new Set());
+      return;
+    }
+
+    setSelectedTopicIds(new Set(nextTopicSet.content_json.topics.map((topic) => topic.id)));
+  }
+
+  async function handlePredictTopics() {
+    setIsPredicting(true);
+    setError(null);
+
+    try {
+      const result = await predictImportantTopics(subject.id);
+      setTopicSet(result);
+      resetSelectedTopics(result);
+      setGeneratedSets((current) => {
+        const existing = current.status === "ready" ? current.data : [];
+        return {
+          status: "ready",
+          data: [result, ...existing.filter((item) => item.id !== result.id)],
+        };
+      });
+    } catch (caughtError) {
+      setError(getMessage(caughtError));
+    } finally {
+      setIsPredicting(false);
+    }
+  }
+
+  function toggleTopic(topicId: number) {
+    setSelectedTopicIds((current) => {
+      const next = new Set(current);
+      if (next.has(topicId)) {
+        next.delete(topicId);
+      } else {
+        next.add(topicId);
+      }
+      return next;
+    });
+  }
+
+  function logSelectedTopics() {
+    console.info("Selected exam prep topics", selectedTopicNames);
+  }
+
   return (
     <motion.section
       animate={{ opacity: 1, y: 0 }}
@@ -1446,20 +1593,146 @@ function ComingSoonPage({ onSubjects }: { onSubjects: () => void }) {
       initial={{ opacity: 0, y: 8 }}
       transition={{ duration: 0.2, ease: "easeOut" }}
     >
-      <section className="rounded-lg border border-border bg-surface p-8">
-        <GraduationCap aria-hidden="true" className="h-8 w-8 text-accent" />
-        <h1 className="mt-4 text-3xl font-semibold text-text-primary">Exam Prep</h1>
-        <p className="mt-2 max-w-2xl text-sm leading-6 text-text-secondary">
-          Coming soon. This section is intentionally out of scope for the current build.
-        </p>
+      <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+        <div>
+          <p className="font-mono text-xs font-medium uppercase text-accent">Exam Prep</p>
+          <h1 className="mt-2 text-3xl font-semibold text-text-primary">{subject.name}</h1>
+          <p className="mt-2 max-w-2xl text-sm leading-6 text-text-secondary">
+            Choose which predicted important topics should shape the upcoming exam prep pack.
+          </p>
+        </div>
         <button
-          className="mt-5 inline-flex h-10 items-center gap-2 rounded-lg border border-border px-4 text-sm font-medium text-text-secondary transition duration-150 ease-out hover:-translate-y-px hover:text-text-primary hover:shadow-interactive"
+          className="inline-flex h-10 items-center justify-center gap-2 rounded-lg border border-border px-4 text-sm font-medium text-text-secondary transition duration-150 ease-out hover:-translate-y-px hover:text-text-primary hover:shadow-interactive"
           onClick={onSubjects}
           type="button"
         >
           <Folder aria-hidden="true" className="h-4 w-4" />
-          Back to Subjects
+          Subjects
         </button>
+      </div>
+
+      <section className="rounded-lg border border-border bg-surface p-5">
+        <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+          <div className="flex items-center gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-accent-soft text-accent">
+              <GraduationCap aria-hidden="true" className="h-5 w-5" />
+            </div>
+            <div>
+              <h2 className="text-lg font-semibold text-text-primary">Topic picker</h2>
+              <p className="text-sm text-text-secondary">
+                {topicContent
+                  ? `${selectedTopicCount} of ${topicContent.topics.length} topics selected`
+                  : "Predict topics to start building an exam pack."}
+              </p>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap gap-2">
+            {topicContent && (
+              <button
+                className="inline-flex h-10 items-center justify-center gap-2 rounded-lg border border-border px-4 text-sm font-medium text-text-secondary transition duration-150 ease-out hover:-translate-y-px hover:text-text-primary hover:shadow-interactive disabled:cursor-not-allowed disabled:opacity-70"
+                disabled={isPredicting}
+                onClick={handlePredictTopics}
+                type="button"
+              >
+                {isPredicting ? (
+                  <SkeletonDot className="h-4 w-4" tone="accent" />
+                ) : (
+                  <RefreshCw aria-hidden="true" className="h-4 w-4" />
+                )}
+                Regenerate Topics
+              </button>
+            )}
+            {!topicContent && (
+              <button
+                className="inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-accent px-4 text-sm font-medium text-white transition duration-150 ease-out hover:-translate-y-px hover:bg-accent-hover hover:shadow-interactive disabled:cursor-not-allowed disabled:opacity-70"
+                disabled={isPredicting || generatedSets.status === "loading"}
+                onClick={handlePredictTopics}
+                type="button"
+              >
+                {isPredicting ? (
+                  <SkeletonDot className="h-4 w-4" tone="light" />
+                ) : (
+                  <Target aria-hidden="true" className="h-4 w-4" />
+                )}
+                Predict Topics
+              </button>
+            )}
+          </div>
+        </div>
+
+        <div className="mt-5">
+          {generatedSets.status === "loading" && <DocumentListSkeleton />}
+          {generatedSets.status === "error" && <ErrorPanel message={generatedSets.message} />}
+          {error && <ErrorPanel message={error} />}
+          {generatedSets.status === "ready" && !topicContent && !isPredicting && (
+            <div className="rounded-lg border border-border bg-surface-alt p-8 text-center">
+              <Target aria-hidden="true" className="mx-auto h-7 w-7 text-accent" />
+              <h3 className="mt-4 text-lg font-semibold text-text-primary">No predicted topics yet</h3>
+              <p className="mx-auto mt-2 max-w-md text-sm leading-6 text-text-secondary">
+                Generate a topic prediction set for this subject, then choose which topics to focus on.
+              </p>
+            </div>
+          )}
+          {isPredicting && <DocumentListSkeleton />}
+          {topicContent && (
+            <div className="space-y-3">
+              {topicContent.topics.map((topic) => {
+                const isSelected = selectedTopicIds.has(topic.id);
+
+                return (
+                  <label
+                    className={`block rounded-lg border p-4 transition duration-150 ease-out hover:-translate-y-px hover:shadow-interactive ${
+                      isSelected
+                        ? "border-accent bg-accent-soft"
+                        : "border-border bg-surface-alt"
+                    }`}
+                    key={topic.id}
+                  >
+                    <div className="flex items-start gap-3">
+                      <input
+                        checked={isSelected}
+                        className="mt-1 h-4 w-4 rounded border-border text-accent focus:ring-accent"
+                        onChange={() => toggleTopic(topic.id)}
+                        type="checkbox"
+                      />
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-start gap-3">
+                          <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-surface text-accent">
+                            <Target aria-hidden="true" className="h-4 w-4" />
+                          </div>
+                          <div className="min-w-0">
+                            <h3 className="text-sm font-semibold text-text-primary">{topic.name}</h3>
+                            <p className="mt-2 text-sm leading-6 text-text-secondary">{topic.reason}</p>
+                            <CitationList citations={topic.citations} />
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </label>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        <div className="mt-5 flex flex-col gap-3 border-t border-border pt-4 md:flex-row md:items-center md:justify-between">
+          <p className="text-sm text-text-secondary">
+            {topicContent
+              ? `${selectedTopicCount} of ${topicContent.topics.length} topics selected`
+              : "No topics selected yet"}
+          </p>
+          <button
+            className="inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-accent px-4 text-sm font-medium text-white transition duration-150 ease-out hover:-translate-y-px hover:bg-accent-hover hover:shadow-interactive disabled:cursor-not-allowed disabled:opacity-70"
+            disabled={!topicContent || selectedTopicCount === 0}
+            onClick={logSelectedTopics}
+            title="Exam prep pack generation is coming in the next step."
+            type="button"
+          >
+            <GraduationCap aria-hidden="true" className="h-4 w-4" />
+            Generate Exam Prep Pack
+          </button>
+        </div>
       </section>
     </motion.section>
   );
@@ -1720,12 +1993,22 @@ function ChatPanel({ subject }: { subject: Subject }) {
   const [activeSessionId, setActiveSessionId] = useState<number | null>(null);
   const [isAnswering, setIsAnswering] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const messageThreadRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     setTurns([]);
     setActiveSessionId(null);
     loadHistory();
   }, [subject.id]);
+
+  useEffect(() => {
+    const messageThread = messageThreadRef.current;
+    if (!messageThread) {
+      return;
+    }
+
+    messageThread.scrollTop = messageThread.scrollHeight;
+  }, [turns, isAnswering]);
 
   function loadHistory() {
     setHistory({ status: "loading" });
@@ -1857,8 +2140,8 @@ function ChatPanel({ subject }: { subject: Subject }) {
         </div>
       </div>
 
-      <div className="mt-5 grid gap-4 lg:grid-cols-[18rem_1fr]">
-        <aside className="rounded-lg border border-border bg-surface-alt p-3">
+      <div className={chatGridClass}>
+        <aside className="flex h-full min-h-0 flex-col rounded-lg border border-border bg-surface-alt p-3">
           <div className="flex items-center justify-between gap-3">
             <div className="flex items-center gap-2">
               <History aria-hidden="true" className="h-4 w-4 text-accent" />
@@ -1898,8 +2181,8 @@ function ChatPanel({ subject }: { subject: Subject }) {
           </div>
         </aside>
 
-        <div>
-          <div className="min-h-56 space-y-4 rounded-lg border border-border bg-surface-alt p-4">
+        <div className="flex h-full min-h-0 flex-col">
+          <div className={chatThreadScrollClass} ref={messageThreadRef}>
             {turns.length === 0 && (
               <div className="flex h-44 items-center justify-center text-center">
                 <div>
@@ -2059,12 +2342,15 @@ function StudyToolsPanel({
     setCardStates({});
 
     try {
-      const result = await generateStudyContent({
-        subjectId: subject.id,
-        type,
-        topic,
-        count: type === "summary" ? 6 : 5,
-      });
+      const result =
+        type === "topic_prediction"
+          ? await predictImportantTopics(subject.id)
+          : await generateStudyContent({
+              subjectId: subject.id,
+              type,
+              topic,
+              count: type === "summary" || type === "short_answer" ? 6 : 5,
+            });
       setGenerated(result);
       setGeneratedSets((current) => {
         const existing = current.status === "ready" ? current.data : [];
@@ -2084,6 +2370,8 @@ function StudyToolsPanel({
     { type: "summary" as const, label: "Summary", icon: FileText },
     { type: "mcq" as const, label: "MCQs", icon: ListChecks },
     { type: "flashcard" as const, label: "Flashcards", icon: Layers },
+    { type: "short_answer" as const, label: "Short/Long Questions", icon: GraduationCap },
+    { type: "topic_prediction" as const, label: "Predicted Topics", icon: Target },
   ];
 
   return (
@@ -2099,7 +2387,7 @@ function StudyToolsPanel({
           </div>
         </div>
 
-        <div className="grid gap-2 sm:grid-cols-3">
+        <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
           {tools.map((tool) => (
             <button
               aria-pressed={activeType === tool.type}
@@ -2121,9 +2409,14 @@ function StudyToolsPanel({
 
       <div className="mt-5 flex flex-col gap-3 md:flex-row">
         <input
-          className="h-11 min-w-0 flex-1 rounded-lg border border-border bg-surface-alt px-3 text-sm text-text-primary outline-none transition duration-150 ease-out focus:border-accent"
+          className="h-11 min-w-0 flex-1 rounded-lg border border-border bg-surface-alt px-3 text-sm text-text-primary outline-none transition duration-150 ease-out focus:border-accent disabled:cursor-not-allowed disabled:opacity-70"
+          disabled={activeType === "topic_prediction"}
           onChange={(event) => setTopic(event.target.value)}
-          placeholder="Optional topic, e.g. access rules"
+          placeholder={
+            activeType === "topic_prediction"
+              ? "Predicted topics use the entire subject"
+              : "Optional topic, e.g. access rules"
+          }
           value={topic}
         />
         <button
@@ -2143,8 +2436,8 @@ function StudyToolsPanel({
 
       {error && <p className="mt-3 text-sm font-medium text-error">{error}</p>}
 
-      <div className="mt-5 grid gap-4 lg:grid-cols-[18rem_1fr]">
-        <aside className="rounded-lg border border-border bg-surface-alt p-3">
+      <div className={studyToolsGridClass}>
+        <aside className="flex h-full min-h-0 flex-col rounded-lg border border-border bg-surface-alt p-3">
           <div className="flex items-center justify-between gap-3">
             <div className="flex items-center gap-2">
               <History aria-hidden="true" className="h-4 w-4 text-accent" />
@@ -2152,7 +2445,7 @@ function StudyToolsPanel({
             </div>
             <IconButton ariaLabel="Refresh generated sets" icon={RefreshCw} onClick={loadGeneratedSets} />
           </div>
-          <div className={sidebarListScrollClass}>
+          <div className={generatedListScrollClass}>
             {generatedSets.status === "loading" && <DocumentListSkeleton />}
             {generatedSets.status === "error" && <ErrorPanel message={generatedSets.message} />}
             {generatedSets.status === "ready" && generatedSets.data.length === 0 && (
@@ -2177,7 +2470,7 @@ function StudyToolsPanel({
                       onClick={() => openGeneratedSet(item)}
                       type="button"
                     >
-                      <p className="text-sm font-medium capitalize text-text-primary">{item.type}</p>
+                      <p className="text-sm font-medium text-text-primary">{getGeneratedTypeLabel(item.type)}</p>
                       <p className="mt-1 line-clamp-2 text-xs text-text-secondary">
                         {getGeneratedTitle(item)}
                       </p>
@@ -2200,7 +2493,7 @@ function StudyToolsPanel({
           </div>
         </aside>
 
-        <div className="rounded-lg border border-border bg-surface-alt p-4">
+        <div className={`rounded-lg border border-border bg-surface-alt p-4 pr-2 ${studyToolsColumnScrollClass}`}>
           {!generated && !isGenerating && (
             <div className="flex min-h-36 items-center justify-center text-center">
               <div>
@@ -2218,8 +2511,8 @@ function StudyToolsPanel({
             <div className="mb-4 flex flex-col gap-3 border-b border-border pb-4 md:flex-row md:items-center md:justify-between">
               <div>
                 <p className="text-xs font-medium uppercase text-text-secondary">Active set</p>
-                <p className="mt-1 text-sm font-semibold capitalize text-text-primary">
-                  {generated.type} - {new Date(generated.created_at).toLocaleString()}
+                <p className="mt-1 text-sm font-semibold text-text-primary">
+                  {getGeneratedTypeLabel(generated.type)} - {new Date(generated.created_at).toLocaleString()}
                 </p>
               </div>
               <GeneratedExportActions content={generated} subjectId={subject.id} />
@@ -2256,6 +2549,14 @@ function StudyToolsPanel({
                 setCardStates((current) => ({ ...current, [cardId]: state }))
               }
             />
+          )}
+
+          {isShortAnswerGeneratedContent(generated) && (
+            <ShortAnswerViewer content={generated.content_json} />
+          )}
+
+          {isTopicPredictionGeneratedContent(generated) && (
+            <TopicPredictionViewer content={generated.content_json} />
           )}
 
           {generated &&
@@ -2327,7 +2628,33 @@ function getGeneratedTitle(content: GeneratedContent): string {
     return cardCount === 1 ? "1 card" : `${cardCount} cards`;
   }
 
+  if (payloadType === "short_answer") {
+    const questionCount = getArrayLength(payload, "questions");
+    return questionCount === 1 ? "1 short/long question" : `${questionCount} short/long questions`;
+  }
+
+  if (payloadType === "topic_prediction") {
+    const topicCount = getArrayLength(payload, "topics");
+    return topicCount === 1 ? "1 predicted topic" : `${topicCount} predicted topics`;
+  }
+
   return "Saved study set";
+}
+
+function getGeneratedTypeLabel(type: GenerationType): string {
+  if (type === "mcq") {
+    return "MCQs";
+  }
+
+  if (type === "topic_prediction") {
+    return "Predicted Topics";
+  }
+
+  if (type === "short_answer") {
+    return "Short/Long Questions";
+  }
+
+  return type.charAt(0).toUpperCase() + type.slice(1);
 }
 
 function getGeneratedPayload(content: GeneratedContent | null): Record<string, unknown> {
@@ -2379,11 +2706,31 @@ function isFlashcardGeneratedContent(
   return getStringField(payload, "type") === "flashcard" && Array.isArray(payload.cards);
 }
 
+function isShortAnswerGeneratedContent(
+  content: GeneratedContent | null,
+): content is GeneratedContent & {
+  content_json: Extract<GeneratedContent["content_json"], { type: "short_answer" }>;
+} {
+  const payload = getGeneratedPayload(content);
+  return getStringField(payload, "type") === "short_answer" && Array.isArray(payload.questions);
+}
+
+function isTopicPredictionGeneratedContent(
+  content: GeneratedContent | null,
+): content is GeneratedContent & {
+  content_json: Extract<GeneratedContent["content_json"], { type: "topic_prediction" }>;
+} {
+  const payload = getGeneratedPayload(content);
+  return getStringField(payload, "type") === "topic_prediction" && Array.isArray(payload.topics);
+}
+
 function isRenderableGeneratedContent(content: GeneratedContent | null): boolean {
   return (
     isSummaryGeneratedContent(content) ||
     isMcqGeneratedContent(content) ||
-    isFlashcardGeneratedContent(content)
+    isFlashcardGeneratedContent(content) ||
+    isShortAnswerGeneratedContent(content) ||
+    isTopicPredictionGeneratedContent(content)
   );
 }
 
@@ -2643,6 +2990,113 @@ function FlashcardViewer({
           </section>
         );
       })}
+    </div>
+  );
+}
+
+function ShortAnswerViewer({
+  content,
+}: {
+  content: Extract<GeneratedContent["content_json"], { type: "short_answer" }>;
+}) {
+  const [revealedQuestionIds, setRevealedQuestionIds] = useState<Set<number>>(new Set());
+
+  useEffect(() => {
+    setRevealedQuestionIds(new Set());
+  }, [content]);
+
+  if (content.questions.length === 0) {
+    return <ErrorPanel message="This short/long question set does not contain any questions." />;
+  }
+
+  function toggleAnswer(questionId: number) {
+    setRevealedQuestionIds((current) => {
+      const next = new Set(current);
+      if (next.has(questionId)) {
+        next.delete(questionId);
+      } else {
+        next.add(questionId);
+      }
+      return next;
+    });
+  }
+
+  return (
+    <div className="space-y-4">
+      {content.questions.map((question) => {
+        const isRevealed = revealedQuestionIds.has(question.id);
+        const isLong = question.difficulty === "long";
+
+        return (
+          <section className="rounded-lg border border-border bg-surface p-4" key={question.id}>
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+              <div className="min-w-0">
+                <span
+                  className={`inline-flex rounded-lg px-2.5 py-1 text-xs font-semibold ${
+                    isLong
+                      ? "bg-warning/15 text-warning"
+                      : "bg-accent-soft text-accent"
+                  }`}
+                >
+                  {isLong ? "Long" : "Short"}
+                </span>
+                <p className="mt-3 text-base font-semibold leading-7 text-text-primary">
+                  {question.question}
+                </p>
+              </div>
+              <button
+                className="inline-flex h-10 shrink-0 items-center justify-center gap-2 rounded-lg border border-border px-4 text-sm font-medium text-text-secondary transition duration-150 ease-out hover:-translate-y-px hover:text-text-primary hover:shadow-interactive"
+                onClick={() => toggleAnswer(question.id)}
+                type="button"
+              >
+                {isRevealed ? "Hide Answer" : "Reveal Answer"}
+              </button>
+            </div>
+
+            {isRevealed && (
+              <div className="mt-4 rounded-lg border border-border bg-surface-alt p-4">
+                <p className="text-xs font-medium uppercase text-text-secondary">Answer guide</p>
+                <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-text-primary">
+                  {question.answer_guide}
+                </p>
+                <CitationList citations={[question.citation]} />
+              </div>
+            )}
+          </section>
+        );
+      })}
+    </div>
+  );
+}
+
+function TopicPredictionViewer({
+  content,
+}: {
+  content: Extract<GeneratedContent["content_json"], { type: "topic_prediction" }>;
+}) {
+  if (content.topics.length === 0) {
+    return <ErrorPanel message="This topic prediction set does not contain any topics." />;
+  }
+
+  return (
+    <div>
+      <h3 className="text-lg font-semibold text-text-primary">{content.title}</h3>
+      <div className="mt-4 space-y-3">
+        {content.topics.map((topic) => (
+          <section className="rounded-lg border border-border bg-surface p-4" key={topic.id}>
+            <div className="flex items-start gap-3">
+              <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-accent-soft text-accent">
+                <Target aria-hidden="true" className="h-4 w-4" />
+              </div>
+              <div className="min-w-0">
+                <h4 className="text-sm font-semibold text-text-primary">{topic.name}</h4>
+                <p className="mt-2 text-sm leading-6 text-text-secondary">{topic.reason}</p>
+                <CitationList citations={topic.citations} />
+              </div>
+            </div>
+          </section>
+        ))}
+      </div>
     </div>
   );
 }

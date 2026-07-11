@@ -94,6 +94,62 @@ Chunks:
 {context}
 """
 
+SHORT_ANSWER_PROMPT_TEMPLATE = """You are PageTurn AI, a source-cited exam-question writer.
+Use ONLY the provided chunks. Do not invent facts, answer-guide points, or citations.
+Return ONLY valid JSON. Do not include markdown fences, preamble, comments, or text after the JSON.
+
+Task:
+Generate exactly {count} short-answer/long-answer exam questions from the retrieved chunks.
+Create a mix of roughly 60% "short" questions and 40% "long" questions.
+Short questions should expect 1-2 sentence answers.
+Long questions should expect paragraph or multi-point answers.
+Each question must include an answer_guide and source_chunk_id for the chunk used.
+The difficulty must be exactly "short" or "long".
+
+JSON schema:
+{{
+  "questions": [
+    {{
+      "question": "string",
+      "answer_guide": "string",
+      "difficulty": "short",
+      "source_chunk_id": "string"
+    }}
+  ]
+}}
+
+Topic: {topic}
+
+Chunks:
+{context}
+"""
+
+TOPIC_PREDICTION_PROMPT_TEMPLATE = """You are PageTurn AI, a source-cited exam-prep assistant.
+Use ONLY the provided chunks. Do not invent facts or citations.
+Return ONLY valid JSON. Do not include markdown fences, preamble, comments, or text after the JSON.
+
+Task:
+Identify the most likely-to-be-tested important topics across the entire subject.
+Prefer topics that are foundational, repeated across chunks/documents, explicitly emphasized, definition-heavy, algorithmic, comparative, or likely to appear as exam questions.
+Each topic MUST include source_chunk_ids for the chunks that support it.
+
+JSON schema:
+{{
+  "topics": [
+    {{
+      "name": "string",
+      "reason": "string",
+      "source_chunk_ids": ["string"]
+    }}
+  ]
+}}
+
+Target topic count: {count}
+
+Chunks:
+{context}
+"""
+
 
 def generate_study_content(
     db: Session,
@@ -101,7 +157,17 @@ def generate_study_content(
     content_type: str,
     topic: str | None,
     count: int,
+    selected_chunk_ids: list[int] | None = None,
 ) -> dict:
+    if content_type == "short_answer":
+        return generate_short_answer_questions(
+            db=db,
+            subject_id=subject_id,
+            topic=topic,
+            count=count,
+            selected_chunk_ids=selected_chunk_ids,
+        )
+
     retrieved = get_generation_context(db, subject_id, topic)
     if not retrieved:
         return {
@@ -127,6 +193,60 @@ def generate_study_content(
     raise ValueError(f"Unsupported generation type: {content_type}")
 
 
+def generate_short_answer_questions(
+    db: Session,
+    subject_id: int,
+    topic: str | None = None,
+    count: int = 5,
+    selected_chunk_ids: list[int] | None = None,
+) -> dict:
+    retrieved = get_short_answer_context(
+        db=db,
+        subject_id=subject_id,
+        topic=topic,
+        selected_chunk_ids=selected_chunk_ids,
+    )
+    if not retrieved:
+        return {
+            "type": "short_answer",
+            "topic": topic,
+            "error": "No indexed document chunks were found for this subject.",
+        }
+
+    source_chunks = build_source_chunk_map(retrieved)
+    prompt = SHORT_ANSWER_PROMPT_TEMPLATE.format(
+        topic=topic.strip() if topic and topic.strip() else "Entire subject",
+        count=count,
+        context=build_context_block(source_chunks),
+    )
+    raw_response = call_generation_llm(prompt)
+    parsed = parse_llm_json(raw_response)
+    return normalize_short_answers(topic, parsed, source_chunks, count)
+
+
+def generate_important_topics(
+    db: Session,
+    subject_id: int,
+    count: int = 8,
+) -> dict:
+    retrieved = get_subject_representative_context(db, subject_id)
+    if not retrieved:
+        return {
+            "type": "topic_prediction",
+            "topic": None,
+            "error": "No indexed document chunks were found for this subject.",
+        }
+
+    source_chunks = build_source_chunk_map(retrieved)
+    prompt = TOPIC_PREDICTION_PROMPT_TEMPLATE.format(
+        count=count,
+        context=build_context_block(source_chunks),
+    )
+    raw_response = call_generation_llm(prompt)
+    parsed = parse_llm_json(raw_response)
+    return normalize_important_topics(parsed, source_chunks, count)
+
+
 def get_generation_context(
     db: Session,
     subject_id: int,
@@ -143,6 +263,86 @@ def get_generation_context(
         .limit(top_k)
     )
     return [RetrievedChunk(chunk=chunk, score=1.0) for chunk in db.scalars(statement)]
+
+
+def get_short_answer_context(
+    db: Session,
+    subject_id: int,
+    topic: str | None,
+    selected_chunk_ids: list[int] | None,
+) -> list[RetrievedChunk]:
+    if selected_chunk_ids:
+        statement = (
+            select(Chunk)
+            .where(Chunk.subject_id == subject_id, Chunk.id.in_(selected_chunk_ids))
+            .order_by(Chunk.document_id, Chunk.page_number, Chunk.chunk_index)
+        )
+        return [RetrievedChunk(chunk=chunk, score=1.0) for chunk in db.scalars(statement)]
+
+    if topic and topic.strip():
+        return get_generation_context(db, subject_id, topic, top_k=8)
+
+    return get_subject_representative_context(db, subject_id, max_chunks=12)
+
+
+def get_subject_representative_context(
+    db: Session,
+    subject_id: int,
+    max_chunks: int = 24,
+) -> list[RetrievedChunk]:
+    statement = (
+        select(Chunk)
+        .where(Chunk.subject_id == subject_id)
+        .order_by(Chunk.document_id, Chunk.page_number, Chunk.chunk_index)
+    )
+    chunks = list(db.scalars(statement).all())
+    if len(chunks) <= max_chunks:
+        return [RetrievedChunk(chunk=chunk, score=1.0) for chunk in chunks]
+
+    chunks_by_document: dict[int, list[Chunk]] = {}
+    for chunk in chunks:
+        chunks_by_document.setdefault(chunk.document_id, []).append(chunk)
+
+    document_ids = list(chunks_by_document.keys())
+    if len(document_ids) >= max_chunks:
+        sampled = [chunks_by_document[document_id][0] for document_id in document_ids[:max_chunks]]
+        return [RetrievedChunk(chunk=chunk, score=1.0) for chunk in sampled]
+
+    base_count = max_chunks // len(document_ids)
+    remainder = max_chunks % len(document_ids)
+    sampled_chunks: list[Chunk] = []
+
+    for index, document_id in enumerate(document_ids):
+        per_document_count = base_count + (1 if index < remainder else 0)
+        sampled_chunks.extend(
+            select_evenly_spaced_chunks(chunks_by_document[document_id], per_document_count)
+        )
+
+    sampled_chunks.sort(key=lambda chunk: (chunk.document_id, chunk.page_number, chunk.chunk_index))
+    return [RetrievedChunk(chunk=chunk, score=1.0) for chunk in sampled_chunks[:max_chunks]]
+
+
+def select_evenly_spaced_chunks(chunks: list[Chunk], count: int) -> list[Chunk]:
+    if count >= len(chunks):
+        return chunks
+
+    if count <= 1:
+        return [chunks[0]]
+
+    last_index = len(chunks) - 1
+    indexes = []
+    for step in range(count):
+        candidate = round((step * last_index) / (count - 1))
+        if candidate not in indexes:
+            indexes.append(candidate)
+
+    next_index = 0
+    while len(indexes) < count and next_index < len(chunks):
+        if next_index not in indexes:
+            indexes.append(next_index)
+        next_index += 1
+
+    return [chunks[index] for index in sorted(indexes)]
 
 
 def build_source_chunk_map(retrieved: list[RetrievedChunk]) -> dict[str, Chunk]:
@@ -169,6 +369,9 @@ def build_generation_prompt(
 
     if content_type == "flashcard":
         return FLASHCARD_PROMPT_TEMPLATE.format(topic=topic_text, count=count, context=context)
+
+    if content_type == "short_answer":
+        return SHORT_ANSWER_PROMPT_TEMPLATE.format(topic=topic_text, count=count, context=context)
 
     raise ValueError(f"Unsupported generation type: {content_type}")
 
@@ -367,6 +570,104 @@ def normalize_flashcards(
         "type": "flashcard",
         "topic": topic,
         "cards": normalized_cards,
+    }
+
+
+def normalize_short_answers(
+    topic: str | None,
+    parsed: dict,
+    source_chunks: dict[str, Chunk],
+    count: int,
+) -> dict:
+    questions = parsed.get("questions")
+    if not isinstance(questions, list):
+        raise ValueError("Short-answer JSON must include a questions array.")
+
+    normalized_questions = []
+    for question in questions[:count]:
+        if not isinstance(question, dict):
+            continue
+
+        source_chunk_id = coerce_string(question.get("source_chunk_id"), "")
+        citation = citation_for_source(source_chunk_id, source_chunks)
+        if citation is None:
+            continue
+
+        difficulty = coerce_string(question.get("difficulty"), "short").lower()
+        if difficulty not in {"short", "long"}:
+            difficulty = "short"
+
+        question_text = coerce_string(question.get("question"), "")
+        answer_guide = coerce_string(question.get("answer_guide"), "")
+        if not question_text or not answer_guide:
+            continue
+
+        normalized_questions.append(
+            {
+                "id": len(normalized_questions) + 1,
+                "question": question_text,
+                "answer_guide": answer_guide,
+                "difficulty": difficulty,
+                "citation": citation,
+            }
+        )
+
+    if not normalized_questions:
+        raise ValueError("Short-answer JSON did not include any usable questions.")
+
+    return {
+        "type": "short_answer",
+        "topic": topic,
+        "questions": normalized_questions,
+    }
+
+
+def normalize_important_topics(parsed: dict, source_chunks: dict[str, Chunk], count: int) -> dict:
+    topics = parsed.get("topics")
+    if not isinstance(topics, list):
+        raise ValueError("Topic prediction JSON must include a topics array.")
+
+    normalized_topics = []
+    for topic in topics[:count]:
+        if not isinstance(topic, dict):
+            continue
+
+        source_chunk_ids = topic.get("source_chunk_ids")
+        if not isinstance(source_chunk_ids, list):
+            source_chunk_ids = []
+
+        citations = []
+        for source_chunk_id in source_chunk_ids:
+            normalized_source_chunk_id = coerce_string(source_chunk_id, "")
+            if not normalized_source_chunk_id:
+                continue
+
+            citation = citation_for_source(normalized_source_chunk_id, source_chunks)
+            if citation is not None:
+                citations.append(citation)
+
+        name = coerce_string(topic.get("name"), "")
+        reason = coerce_string(topic.get("reason"), "")
+        if not name or not reason:
+            continue
+
+        normalized_topics.append(
+            {
+                "id": len(normalized_topics) + 1,
+                "name": name,
+                "reason": reason,
+                "citations": unique_citations(citations),
+            }
+        )
+
+    if not normalized_topics:
+        raise ValueError("Topic prediction JSON did not include any usable topics.")
+
+    return {
+        "type": "topic_prediction",
+        "topic": None,
+        "title": "Predicted important topics",
+        "topics": normalized_topics,
     }
 
 

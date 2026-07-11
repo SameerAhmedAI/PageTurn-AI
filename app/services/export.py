@@ -49,6 +49,35 @@ def generated_content_to_markdown(content: dict) -> str:
             append_citations(lines, [card.get("citation")])
         return "\n".join(lines).strip() + "\n"
 
+    if content_type == "short_answer":
+        for question in content.get("questions", []):
+            difficulty = str(question.get("difficulty", "short")).title()
+            lines.extend(
+                [
+                    f"## {difficulty} Question {question.get('id')}",
+                    "",
+                    str(question.get("question", "")),
+                    "",
+                    f"Answer guide: {question.get('answer_guide', '')}",
+                    "",
+                ]
+            )
+            append_citations(lines, [question.get("citation")])
+        return "\n".join(lines).strip() + "\n"
+
+    if content_type == "topic_prediction":
+        for topic in content.get("topics", []):
+            lines.extend(
+                [
+                    f"## {topic.get('name', 'Predicted topic')}",
+                    "",
+                    str(topic.get("reason", "")),
+                    "",
+                ]
+            )
+            append_citations(lines, topic.get("citations", []))
+        return "\n".join(lines).strip() + "\n"
+
     lines.append("Unsupported generated content shape.")
     return "\n".join(lines).strip() + "\n"
 

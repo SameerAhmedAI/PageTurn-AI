@@ -25,7 +25,7 @@ from app.schemas import (
     SubjectUpdate,
 )
 from app.services.export import generated_content_to_markdown, generated_content_to_pdf_bytes
-from app.services.generation import generate_study_content
+from app.services.generation import generate_important_topics, generate_study_content
 from app.services.indexing import delete_document_vectors, delete_subject_collection, retrieve_chunks
 from app.services.llm import generate_answer
 from app.services.pdf_processing import process_pdf_document
@@ -369,10 +369,42 @@ def generate_content_for_subject(
         content_type=payload.type,
         topic=payload.topic,
         count=payload.count,
+        selected_chunk_ids=payload.selected_chunk_ids,
     )
     generated = GeneratedContent(
         subject_id=subject_id,
         type=payload.type,
+        content_json=json.dumps(content),
+    )
+    db.add(generated)
+    db.commit()
+    db.refresh(generated)
+
+    return GeneratedContentRead(
+        id=generated.id,
+        subject_id=generated.subject_id,
+        type=generated.type,
+        content_json=content,
+        created_at=generated.created_at,
+    )
+
+
+@router.post("/{subject_id}/predict-topics", response_model=GeneratedContentRead)
+def predict_topics_for_subject(
+    subject_id: int,
+    db: Session = Depends(get_db),
+) -> GeneratedContentRead:
+    subject = db.get(Subject, subject_id)
+    if subject is None:
+        raise HTTPException(status_code=404, detail="Subject not found.")
+
+    content = generate_important_topics(
+        db=db,
+        subject_id=subject_id,
+    )
+    generated = GeneratedContent(
+        subject_id=subject_id,
+        type="topic_prediction",
         content_json=json.dumps(content),
     )
     db.add(generated)

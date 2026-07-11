@@ -48,9 +48,10 @@ class CitationRead(BaseModel):
 
 
 class GenerateRequest(BaseModel):
-    type: Literal["summary", "mcq", "flashcard"]
+    type: Literal["summary", "mcq", "flashcard", "short_answer"]
     topic: str | None = Field(default=None, max_length=300)
     count: int = Field(default=5, ge=1, le=10)
+    selected_chunk_ids: list[int] | None = None
 
 
 class GeneratedContentRead(BaseModel):

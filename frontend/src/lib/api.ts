@@ -33,7 +33,12 @@ export type Citation = {
   chunk_text: string;
 };
 
-export type GenerationType = "summary" | "mcq" | "flashcard";
+export type GenerationType =
+  | "summary"
+  | "mcq"
+  | "flashcard"
+  | "short_answer"
+  | "topic_prediction";
 
 export type SummaryContent = {
   type: "summary";
@@ -74,7 +79,38 @@ export type FlashcardContent = {
   error?: string;
 };
 
-export type GeneratedContentPayload = SummaryContent | McqContent | FlashcardContent;
+export type ShortAnswerContent = {
+  type: "short_answer";
+  topic: string | null;
+  questions: Array<{
+    id: number;
+    question: string;
+    answer_guide: string;
+    difficulty: "short" | "long";
+    citation: Citation;
+  }>;
+  error?: string;
+};
+
+export type TopicPredictionContent = {
+  type: "topic_prediction";
+  topic: null;
+  title: string;
+  topics: Array<{
+    id: number;
+    name: string;
+    reason: string;
+    citations: Citation[];
+  }>;
+  error?: string;
+};
+
+export type GeneratedContentPayload =
+  | SummaryContent
+  | McqContent
+  | FlashcardContent
+  | ShortAnswerContent
+  | TopicPredictionContent;
 
 export type GeneratedContent = {
   id: number;
@@ -202,11 +238,13 @@ export async function generateStudyContent({
   type,
   topic,
   count,
+  selectedChunkIds,
 }: {
   subjectId: number;
   type: GenerationType;
   topic?: string;
   count?: number;
+  selectedChunkIds?: number[];
 }): Promise<GeneratedContent> {
   return request<GeneratedContent>(`/subjects/${subjectId}/generate`, {
     method: "POST",
@@ -217,7 +255,14 @@ export async function generateStudyContent({
       type,
       topic: topic?.trim() || null,
       count: count ?? 5,
+      selected_chunk_ids: selectedChunkIds ?? null,
     }),
+  });
+}
+
+export async function predictImportantTopics(subjectId: number): Promise<GeneratedContent> {
+  return request<GeneratedContent>(`/subjects/${subjectId}/predict-topics`, {
+    method: "POST",
   });
 }
 
