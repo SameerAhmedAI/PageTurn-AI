@@ -345,4 +345,4 @@ Open [http://127.0.0.1:5173](http://127.0.0.1:5173) in your web browser.
 ---
 
 ## 📄 License
-This project is licensed under the ISC License. Feel free to fork, modify, and distribute as needed.
+Licensed under the MIT License.
