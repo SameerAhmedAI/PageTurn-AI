@@ -51,6 +51,7 @@ Task:
 Generate exactly {count} multiple-choice questions from the retrieved chunks.
 Each question must have exactly 4 options, one correct answer, a short explanation, and source_chunk_id for the chunk used.
 The correct_index must be an integer from 0 to 3.
+Distribute correct_index values across different positions. Do not put the correct answer in the same option position for every question.
 If Topic is not "Entire subject", write questions ONLY about that topic and ignore unrelated material even if it appears in the chunks.
 {scope_instruction}
 
@@ -184,8 +185,14 @@ def generate_study_content(
 
     source_chunks = build_source_chunk_map(retrieved)
     prompt = build_generation_prompt(content_type, topic, count, source_chunks)
+    if content_type == "mcq":
+        logger.warning("MCQ final LLM prompt:\n%s", prompt)
     raw_response = call_generation_llm(prompt)
+    if content_type == "mcq":
+        logger.warning("MCQ raw LLM response:\n%s", raw_response)
     parsed = parse_llm_json(raw_response)
+    if content_type == "mcq":
+        logger.warning("MCQ raw correct_index values: %s", get_raw_mcq_correct_indexes(parsed))
 
     if content_type == "summary":
         return normalize_summary(topic, parsed, source_chunks)
@@ -218,7 +225,8 @@ def generate_exam_prep_pack(
     if not topics_covered:
         topics_covered = get_topics_for_selected_chunks(db, subject_id, normalized_chunk_ids)
 
-    focus_topic = build_exam_prep_focus_topic(topics_covered)
+    excluded_topic_names = get_unselected_topic_names(db, subject_id, topics_covered)
+    focus_topic = build_exam_prep_focus_topic(topics_covered, excluded_topic_names)
 
     try:
         summary = generate_study_content(
@@ -316,13 +324,63 @@ def normalize_selected_topics(selected_topics: list[dict] | None) -> list[dict]:
     return normalized
 
 
-def build_exam_prep_focus_topic(topics_covered: list[dict]) -> str | None:
+def build_exam_prep_focus_topic(
+    topics_covered: list[dict],
+    excluded_topic_names: list[str] | None = None,
+) -> str | None:
     names = [coerce_string(topic.get("name"), "") for topic in topics_covered]
     names = [name for name in names if name]
     if not names:
         return None
 
-    return "Selected exam prep topics: " + "; ".join(names)
+    topic_text = "Selected exam prep topics: " + "; ".join(names)
+    if excluded_topic_names:
+        topic_text += "\nOut-of-scope topics: " + "; ".join(excluded_topic_names)
+    return topic_text
+
+
+def get_unselected_topic_names(
+    db: Session,
+    subject_id: int,
+    selected_topics: list[dict],
+) -> list[str]:
+    selected_names = {
+        coerce_string(topic.get("name"), "").lower()
+        for topic in selected_topics
+        if isinstance(topic, dict)
+    }
+    if not selected_names:
+        return []
+
+    statement = (
+        select(GeneratedContent)
+        .where(
+            GeneratedContent.subject_id == subject_id,
+            GeneratedContent.type == "topic_prediction",
+        )
+        .order_by(GeneratedContent.created_at.desc(), GeneratedContent.id.desc())
+        .limit(1)
+    )
+    generated = db.scalar(statement)
+    if generated is None:
+        return []
+
+    try:
+        content = json.loads(generated.content_json)
+    except json.JSONDecodeError:
+        logger.warning("Saved topic_prediction %s contains invalid JSON.", generated.id)
+        return []
+
+    excluded_names = []
+    for topic in content.get("topics", []):
+        if not isinstance(topic, dict):
+            continue
+
+        name = coerce_string(topic.get("name"), "")
+        if name and name.lower() not in selected_names:
+            excluded_names.append(name)
+
+    return excluded_names
 
 
 def generate_short_answer_questions(
@@ -351,7 +409,7 @@ def generate_short_answer_questions(
         topic=topic_text,
         count=count,
         scope_instruction=build_scope_instruction(topic_text),
-        context=build_context_block(source_chunks),
+        context=build_context_block(source_chunks, topic_text),
     )
     raw_response = call_generation_llm(prompt)
     parsed = parse_llm_json(raw_response)
@@ -562,8 +620,8 @@ def build_generation_prompt(
     count: int,
     source_chunks: dict[str, Chunk],
 ) -> str:
-    context = build_context_block(source_chunks)
     topic_text = topic.strip() if topic and topic.strip() else "Entire subject"
+    context = build_context_block(source_chunks, topic_text)
     scope_instruction = build_scope_instruction(topic_text)
 
     if content_type == "summary":
@@ -604,14 +662,22 @@ def build_scope_instruction(topic_text: str) -> str:
         "Scope rule: Treat the Topic line as the complete allowed scope. "
         "Every generated item must be directly about one of those selected topic names. "
         "If a concept appears in the chunks but is not one of the selected topics, ignore it. "
+        "Do not ask about application case studies, systems, algorithms, or predicted topics listed as out of scope. "
         "Before returning each question or bullet, verify that it belongs to the selected topics; "
         "discard and replace anything outside that scope."
     )
 
 
-def build_context_block(source_chunks: dict[str, Chunk]) -> str:
+def build_context_block(source_chunks: dict[str, Chunk], topic_text: str | None = None) -> str:
+    selected_topic_names = parse_selected_topic_names(topic_text)
     blocks = []
     for source_chunk_id, chunk in source_chunks.items():
+        content = chunk.content
+        if selected_topic_names:
+            content = build_focused_chunk_excerpt(chunk.content, selected_topic_names)
+            if not content:
+                continue
+
         blocks.append(
             "\n".join(
                 [
@@ -619,11 +685,87 @@ def build_context_block(source_chunks: dict[str, Chunk]) -> str:
                     f"filename: {chunk.document.filename}",
                     f"page_number: {chunk.page_number}",
                     "text:",
-                    chunk.content,
+                    content,
                 ]
             )
         )
-    return "\n\n---\n\n".join(blocks)
+
+    if blocks:
+        return "\n\n---\n\n".join(blocks)
+
+    return build_context_block(source_chunks)
+
+
+def parse_selected_topic_names(topic_text: str | None) -> list[str]:
+    if not topic_text or "Selected exam prep topics:" not in topic_text:
+        return []
+
+    selected_line = topic_text.split("Selected exam prep topics:", 1)[1].splitlines()[0]
+    return [name.strip() for name in selected_line.split(";") if name.strip()]
+
+
+def build_focused_chunk_excerpt(content: str, selected_topic_names: list[str]) -> str:
+    segments = split_context_segments(content)
+    focused_segments = []
+    for segment in segments:
+        if segment_matches_selected_topic(segment, selected_topic_names):
+            focused_segments.append(segment)
+
+    return "\n".join(unique_ordered(focused_segments))
+
+
+def split_context_segments(content: str) -> list[str]:
+    return [
+        segment.strip()
+        for segment in re.split(r"(?<=[.!?])\s+|\n+", content)
+        if segment.strip()
+    ]
+
+
+def segment_matches_selected_topic(segment: str, selected_topic_names: list[str]) -> bool:
+    normalized_segment = normalize_match_text(segment)
+    for topic_name in selected_topic_names:
+        if any(variant in normalized_segment for variant in topic_phrase_variants(topic_name)):
+            return True
+
+        keywords = topic_keywords(topic_name)
+        if keywords and all(keyword in normalized_segment for keyword in keywords):
+            return True
+
+    return False
+
+
+def topic_phrase_variants(topic_name: str) -> list[str]:
+    normalized = normalize_match_text(topic_name)
+    variants = [normalized]
+    if normalized.endswith(" definition"):
+        variants.append(normalized.removesuffix(" definition").strip())
+    return [variant for variant in variants if variant]
+
+
+def topic_keywords(topic_name: str) -> list[str]:
+    stopwords = {"and", "the", "for", "with", "from", "into", "this", "that"}
+    normalized = normalize_match_text(topic_name)
+    return [
+        token
+        for token in normalized.split()
+        if len(token) > 3 and token not in stopwords
+    ]
+
+
+def normalize_match_text(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
+
+
+def unique_ordered(items: list[str]) -> list[str]:
+    seen = set()
+    unique_items = []
+    for item in items:
+        if item in seen:
+            continue
+        seen.add(item)
+        unique_items.append(item)
+    return unique_items
 
 
 def call_generation_llm(prompt: str) -> str:
@@ -745,11 +887,18 @@ def normalize_mcqs(
         if citation is None:
             continue
 
+        normalized_options = [coerce_string(option, "") for option in options]
+        normalized_options, correct_index = rebalance_mcq_options(
+            normalized_options,
+            correct_index,
+            len(normalized_questions),
+        )
+
         normalized_questions.append(
             {
                 "id": len(normalized_questions) + 1,
                 "question": coerce_string(question.get("question"), ""),
-                "options": [coerce_string(option, "") for option in options],
+                "options": normalized_options,
                 "correct_index": correct_index,
                 "explanation": coerce_string(question.get("explanation"), ""),
                 "citation": citation,
@@ -764,6 +913,35 @@ def normalize_mcqs(
         "topic": topic,
         "questions": normalized_questions,
     }
+
+
+def rebalance_mcq_options(
+    options: list[str],
+    correct_index: int,
+    question_offset: int,
+) -> tuple[list[str], int]:
+    target_index = question_offset % len(options)
+    if target_index == correct_index:
+        return options, correct_index
+
+    rebalanced = list(options)
+    rebalanced[target_index], rebalanced[correct_index] = (
+        rebalanced[correct_index],
+        rebalanced[target_index],
+    )
+    return rebalanced, target_index
+
+
+def get_raw_mcq_correct_indexes(parsed: dict) -> list[object]:
+    questions = parsed.get("questions")
+    if not isinstance(questions, list):
+        return []
+
+    return [
+        question.get("correct_index")
+        for question in questions
+        if isinstance(question, dict)
+    ]
 
 
 def normalize_flashcards(
