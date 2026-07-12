@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.database import init_db
-from app.routers import health, subjects
+from app.routers import admin, health, subjects
 
 
 app = FastAPI(
@@ -41,4 +41,5 @@ def on_startup() -> None:
 
 
 app.include_router(health.router)
+app.include_router(admin.router)
 app.include_router(subjects.router)

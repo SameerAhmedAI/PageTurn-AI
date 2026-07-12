@@ -120,29 +120,8 @@ def delete_subject(subject_id: int, db: Session = Depends(get_db)) -> dict[str, 
     if subject is None:
         raise HTTPException(status_code=404, detail="Subject not found.")
 
-    document_ids = select(Document.id).where(Document.subject_id == subject_id)
-    session_ids = select(ChatSession.id).where(ChatSession.subject_id == subject_id)
-    message_ids = select(ChatMessage.id).where(ChatMessage.session_id.in_(session_ids))
-    subject_dir = STORAGE_DIR / str(subject_id)
-
     try:
-        delete_subject_collection(subject_id)
-        delete_storage_tree(subject_dir)
-
-        db.execute(
-            delete(Citation).where(
-                or_(
-                    Citation.message_id.in_(message_ids),
-                    Citation.document_id.in_(document_ids),
-                )
-            )
-        )
-        db.execute(delete(ChatMessage).where(ChatMessage.session_id.in_(session_ids)))
-        db.execute(delete(ChatSession).where(ChatSession.subject_id == subject_id))
-        db.execute(delete(GeneratedContent).where(GeneratedContent.subject_id == subject_id))
-        db.execute(delete(Chunk).where(Chunk.subject_id == subject_id))
-        db.execute(delete(Document).where(Document.subject_id == subject_id))
-        db.execute(delete(Subject).where(Subject.id == subject_id))
+        delete_subject_resources(subject_id, db)
         db.commit()
     except Exception as exc:
         db.rollback()
@@ -153,6 +132,31 @@ def delete_subject(subject_id: int, db: Session = Depends(get_db)) -> dict[str, 
         raise HTTPException(status_code=500, detail=f"Failed to delete subject: {exc}") from exc
 
     return {"detail": f"Subject {subject_id} deleted successfully."}
+
+
+def delete_subject_resources(subject_id: int, db: Session) -> None:
+    document_ids = select(Document.id).where(Document.subject_id == subject_id)
+    session_ids = select(ChatSession.id).where(ChatSession.subject_id == subject_id)
+    message_ids = select(ChatMessage.id).where(ChatMessage.session_id.in_(session_ids))
+    subject_dir = STORAGE_DIR / str(subject_id)
+
+    delete_subject_collection(subject_id)
+    delete_storage_tree(subject_dir)
+
+    db.execute(
+        delete(Citation).where(
+            or_(
+                Citation.message_id.in_(message_ids),
+                Citation.document_id.in_(document_ids),
+            )
+        )
+    )
+    db.execute(delete(ChatMessage).where(ChatMessage.session_id.in_(session_ids)))
+    db.execute(delete(ChatSession).where(ChatSession.subject_id == subject_id))
+    db.execute(delete(GeneratedContent).where(GeneratedContent.subject_id == subject_id))
+    db.execute(delete(Chunk).where(Chunk.subject_id == subject_id))
+    db.execute(delete(Document).where(Document.subject_id == subject_id))
+    db.execute(delete(Subject).where(Subject.id == subject_id))
 
 
 @router.post("/{subject_id}/documents", response_model=DocumentRead, status_code=status.HTTP_201_CREATED)
@@ -257,6 +261,39 @@ def list_generated_content(
     )
 
     return [generated_content_read(content, db) for content in db.scalars(statement).all()]
+
+
+@router.delete("/{subject_id}/generated/all")
+def delete_subject_generated_content(
+    subject_id: int,
+    db: Session = Depends(get_db),
+) -> dict[str, str | int]:
+    subject = db.get(Subject, subject_id)
+    if subject is None:
+        raise HTTPException(status_code=404, detail="Subject not found.")
+
+    generated_count = int(
+        db.scalar(
+            select(func.count(GeneratedContent.id)).where(GeneratedContent.subject_id == subject_id)
+        )
+        or 0
+    )
+
+    try:
+        db.execute(delete(GeneratedContent).where(GeneratedContent.subject_id == subject_id))
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        logger.exception("Failed to delete generated study sets for subject %s.", subject_id)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to delete subject study sets: {exc}",
+        ) from exc
+
+    return {
+        "detail": f"Deleted {generated_count} generated study sets for {subject.name}.",
+        "deleted_count": generated_count,
+    }
 
 
 @router.delete("/{subject_id}/generated/{content_id}")
@@ -604,6 +641,61 @@ def get_chat_history(
     sessions = db.scalars(statement).all()
 
     return [build_chat_session_read(db, session) for session in sessions]
+
+
+@router.delete("/{subject_id}/chat/sessions/all")
+def delete_subject_chat_sessions(
+    subject_id: int,
+    db: Session = Depends(get_db),
+) -> dict[str, str | int]:
+    subject = db.get(Subject, subject_id)
+    if subject is None:
+        raise HTTPException(status_code=404, detail="Subject not found.")
+
+    session_ids = select(ChatSession.id).where(ChatSession.subject_id == subject_id)
+    message_ids = select(ChatMessage.id).where(ChatMessage.session_id.in_(session_ids))
+    chat_count = int(
+        db.scalar(select(func.count(ChatSession.id)).where(ChatSession.subject_id == subject_id))
+        or 0
+    )
+
+    try:
+        db.execute(delete(Citation).where(Citation.message_id.in_(message_ids)))
+        db.execute(delete(ChatMessage).where(ChatMessage.session_id.in_(session_ids)))
+        db.execute(delete(ChatSession).where(ChatSession.subject_id == subject_id))
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        logger.exception("Failed to delete chat history for subject %s.", subject_id)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to delete subject chat history: {exc}",
+        ) from exc
+
+    return {
+        "detail": f"Deleted {chat_count} chat sessions for {subject.name}.",
+        "deleted_count": chat_count,
+    }
+
+
+@router.delete("/{subject_id}/chat/sessions/{session_id}")
+def delete_chat_session(
+    subject_id: int,
+    session_id: int,
+    db: Session = Depends(get_db),
+) -> dict[str, str]:
+    session = db.get(ChatSession, session_id)
+    if session is None or session.subject_id != subject_id:
+        raise HTTPException(status_code=404, detail="Chat session not found.")
+
+    message_ids = select(ChatMessage.id).where(ChatMessage.session_id == session_id)
+
+    db.execute(delete(Citation).where(Citation.message_id.in_(message_ids)))
+    db.execute(delete(ChatMessage).where(ChatMessage.session_id == session_id))
+    db.execute(delete(ChatSession).where(ChatSession.id == session_id))
+    db.commit()
+
+    return {"detail": f"Chat session {session_id} deleted successfully."}
 
 
 def build_citations(retrieved_chunks) -> list[CitationRead]:

@@ -245,6 +245,49 @@ export async function deleteGeneratedContent(
   });
 }
 
+export async function deleteSubjectChatHistory(
+  subjectId: number,
+): Promise<{ detail: string; deleted_count: number }> {
+  return request<{ detail: string; deleted_count: number }>(
+    `/subjects/${subjectId}/chat/sessions/all`,
+    {
+      method: "DELETE",
+    },
+  );
+}
+
+export async function deleteSubjectGeneratedContent(
+  subjectId: number,
+): Promise<{ detail: string; deleted_count: number }> {
+  return request<{ detail: string; deleted_count: number }>(
+    `/subjects/${subjectId}/generated/all`,
+    {
+      method: "DELETE",
+    },
+  );
+}
+
+export async function deleteAllSubjects(): Promise<{ detail: string; deleted_count: number }> {
+  return request<{ detail: string; deleted_count: number }>("/admin/subjects/all", {
+    method: "DELETE",
+  });
+}
+
+export async function deleteAllChats(): Promise<{ detail: string; deleted_count: number }> {
+  return request<{ detail: string; deleted_count: number }>("/admin/chats/all", {
+    method: "DELETE",
+  });
+}
+
+export async function deleteAllGeneratedContent(): Promise<{
+  detail: string;
+  deleted_count: number;
+}> {
+  return request<{ detail: string; deleted_count: number }>("/admin/generated-content/all", {
+    method: "DELETE",
+  });
+}
+
 export function getDocumentFileUrl(documentId: number, pageNumber: number): string {
   return `${API_BASE_URL}/subjects/document-files/${documentId}#page=${pageNumber}`;
 }
@@ -327,6 +370,15 @@ export async function fetchAllGeneratedContent(): Promise<GeneratedContent[]> {
 
 export async function fetchChatHistory(subjectId: number): Promise<ChatHistorySession[]> {
   return request<ChatHistorySession[]>(`/subjects/${subjectId}/chat/history`);
+}
+
+export async function deleteChatSession(
+  subjectId: number,
+  sessionId: number,
+): Promise<{ detail: string }> {
+  return request<{ detail: string }>(`/subjects/${subjectId}/chat/sessions/${sessionId}`, {
+    method: "DELETE",
+  });
 }
 
 export function getGeneratedExportUrl(

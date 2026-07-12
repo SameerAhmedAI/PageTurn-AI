@@ -12,12 +12,15 @@ import {
   FileText,
   FileUp,
   Folder,
+  Github,
   GraduationCap,
   History,
   Layers,
   ListChecks,
   MessageSquare,
   Moon,
+  PanelLeftClose,
+  PanelLeftOpen,
   Pencil,
   Plus,
   Quote,
@@ -36,8 +39,12 @@ import { AnimatePresence, motion } from "framer-motion";
 import { Logo } from "./components/Logo";
 import {
   createSubject,
+  deleteAllChats,
+  deleteAllGeneratedContent,
+  deleteAllSubjects,
   deleteDocument,
   deleteGeneratedContent,
+  deleteChatSession,
   deleteSubject,
   fetchAllGeneratedContent,
   fetchChatHistory,
@@ -100,8 +107,6 @@ type StudySetCategoryFilter = GenerationType | "all";
 
 const navItems: Array<{ id: AppView; label: string; icon: LucideIcon }> = [
   { id: "subjects", label: "Subjects", icon: Folder },
-  { id: "upload", label: "Upload", icon: Upload },
-  { id: "chat", label: "Chat", icon: MessageSquare },
   { id: "studySets", label: "Study Sets", icon: Layers },
   { id: "examPrep", label: "Exam Prep", icon: GraduationCap },
   { id: "settings", label: "Settings", icon: Settings },
@@ -148,6 +153,7 @@ const generatedListScrollClass =
 
 export default function App() {
   const [theme, setTheme] = useState<"light" | "dark">(() => getInitialTheme());
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(() => getInitialSidebarCollapsed());
   const [activeView, setActiveView] = useState<AppView>("subjects");
   const [health, setHealth] = useState<HealthState>({ status: "loading" });
   const [subjects, setSubjects] = useState<SubjectsState>({ status: "loading" });
@@ -191,6 +197,10 @@ export default function App() {
     document.documentElement.classList.toggle("dark", theme === "dark");
     window.localStorage.setItem("pageturn-theme", theme);
   }, [theme]);
+
+  useEffect(() => {
+    window.localStorage.setItem("pageturn-sidebar-collapsed", String(isSidebarCollapsed));
+  }, [isSidebarCollapsed]);
 
   useEffect(() => {
     let isMounted = true;
@@ -491,6 +501,31 @@ export default function App() {
     loadDashboardStats();
   }
 
+  async function handleDeleteAllSubjects(): Promise<string> {
+    const result = await deleteAllSubjects();
+    setSelectedSubjectId(null);
+    setDocuments({ status: "ready", data: [] });
+    setSubjects({ status: "ready", data: [] });
+    setAllGeneratedSets({ status: "ready", data: [] });
+    loadSubjects();
+    loadDashboardStats();
+    return result.detail;
+  }
+
+  async function handleDeleteAllChats(): Promise<string> {
+    const result = await deleteAllChats();
+    loadDashboardStats();
+    return result.detail;
+  }
+
+  async function handleDeleteAllGeneratedContent(): Promise<string> {
+    const result = await deleteAllGeneratedContent();
+    setAllGeneratedSets({ status: "ready", data: [] });
+    loadAllGeneratedSets();
+    loadDashboardStats();
+    return result.detail;
+  }
+
   async function confirmDelete() {
     const pendingDelete = deleteConfirmation;
     setDeleteConfirmation(null);
@@ -522,23 +557,50 @@ export default function App() {
     <div className="min-h-screen bg-bg text-text-primary">
       <TopProgressBar active={isBackgroundActionActive} />
       <div className="flex min-h-screen">
-        <aside className="hidden w-72 shrink-0 border-r border-border bg-surface px-4 py-6 lg:block">
-          <Logo />
-          <nav className="mt-8 space-y-1">
+        <aside
+          className={`hidden shrink-0 border-r border-border bg-surface py-6 transition-[width,padding] duration-200 ease-out lg:flex lg:flex-col ${
+            isSidebarCollapsed ? "w-[68px] px-3" : "w-72 px-4"
+          }`}
+        >
+          <div
+            className={`flex ${
+              isSidebarCollapsed
+                ? "flex-col items-center gap-3"
+                : "items-center justify-between gap-3"
+            }`}
+          >
+            <Logo compact={isSidebarCollapsed} />
+            <button
+              aria-label={isSidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-border bg-surface text-text-secondary transition duration-150 ease-out hover:-translate-y-px hover:text-accent hover:shadow-interactive"
+              onClick={() => setIsSidebarCollapsed((current) => !current)}
+              title={isSidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+              type="button"
+            >
+              {isSidebarCollapsed ? (
+                <PanelLeftOpen aria-hidden="true" className="h-4 w-4" />
+              ) : (
+                <PanelLeftClose aria-hidden="true" className="h-4 w-4" />
+              )}
+            </button>
+          </div>
+          <nav className={`space-y-1 ${isSidebarCollapsed ? "mt-6" : "mt-8"}`}>
             {navItems.map((item) => (
               <button
                 aria-current={activeView === item.id ? "page" : undefined}
+                aria-label={isSidebarCollapsed ? item.label : undefined}
                 key={item.label}
-                className={`group flex h-11 w-full items-center gap-3 rounded-lg px-3 text-left text-sm font-medium transition duration-150 ease-out hover:-translate-y-px hover:shadow-interactive ${
+                className={`group flex h-11 w-full items-center rounded-lg text-sm font-medium transition duration-150 ease-out hover:-translate-y-px hover:shadow-interactive ${
                   activeView === item.id
                     ? "bg-accent-soft text-accent"
                     : "text-text-secondary hover:bg-surface-alt hover:text-text-primary"
-                }`}
+                } ${isSidebarCollapsed ? "justify-center px-0" : "gap-3 px-3 text-left"}`}
                 onClick={() => handleNav(item.id)}
+                title={isSidebarCollapsed ? item.label : undefined}
                 type="button"
               >
                 <item.icon aria-hidden="true" className="h-4 w-4" />
-                {item.label}
+                {!isSidebarCollapsed && <span>{item.label}</span>}
               </button>
             ))}
           </nav>
@@ -583,14 +645,12 @@ export default function App() {
                     );
                 }}
                 onDeleteDocument={handleDeleteDocument}
-                onDeleteGenerated={handleDeleteGeneratedContent}
                 onRenameSubject={handleRenameSubject}
                 onUpload={handleUpload}
                 refInput={fileInputRef}
                 subject={selectedSubject}
                 deleteError={documentDeleteError}
                 deletingDocumentId={deletingDocumentId}
-                onStudyGenerationChange={setIsStudyGenerating}
                 uploadError={uploadError}
               />
             ) : activeView === "subjects" ? (
@@ -647,8 +707,9 @@ export default function App() {
               selectedSubject ? (
                 <ExamPrepPage
                   key={`exam-prep-page-${selectedSubject.id}`}
+                  onBack={() => setSelectedSubjectId(null)}
+                  onDeleteGenerated={handleDeleteGeneratedContent}
                   onGenerationChange={setIsStudyGenerating}
-                  onSubjects={() => handleNav("subjects")}
                   subject={selectedSubject}
                 />
               ) : (
@@ -671,6 +732,9 @@ export default function App() {
               <SettingsPage
                 key="settings-page"
                 llmConfig={llmConfig}
+                onDeleteAllChats={handleDeleteAllChats}
+                onDeleteAllGeneratedContent={handleDeleteAllGeneratedContent}
+                onDeleteAllSubjects={handleDeleteAllSubjects}
                 onRefresh={loadLlmConfig}
                 onToggleTheme={() =>
                   setTheme((current) => (current === "light" ? "dark" : "light"))
@@ -679,6 +743,7 @@ export default function App() {
               />
             )}
           </AnimatePresence>
+          <MainFooter />
         </main>
       </div>
 
@@ -733,6 +798,33 @@ function TopProgressBar({ active }: { active: boolean }) {
         />
       )}
     </AnimatePresence>
+  );
+}
+
+function MainFooter() {
+  return (
+    <footer className="shrink-0 border-t border-border bg-surface/80 px-3 py-2">
+      <div className="grid w-full grid-cols-[1fr_auto_1fr] items-center gap-4 whitespace-nowrap text-[11px] leading-none sm:text-xs">
+        <div aria-hidden="true" />
+        <div className="min-w-0 text-center">
+          <span className="mr-1 text-text-secondary">
+            An open-source, citation-first study assistant.
+          </span>
+          <span className="font-medium text-text-primary">PageTurn © 2026</span>
+        </div>
+        <div className="flex justify-end">
+          <a
+            aria-label="PageTurn AI on GitHub"
+            className="inline-flex h-5 w-5 shrink-0 items-center justify-center text-text-secondary transition duration-150 ease-out hover:-translate-y-px hover:text-accent-hover"
+            href="https://github.com/SameerAhmedAI/PageTurn-AI"
+            rel="noopener noreferrer"
+            target="_blank"
+          >
+            <Github aria-hidden="true" className="h-4 w-4" />
+          </a>
+        </div>
+      </div>
+    </footer>
   );
 }
 
@@ -1497,12 +1589,17 @@ function getStudySetFilterEmptyTitle(
 }
 
 function ExamPrepPage({
+  onBack,
+  onDeleteGenerated,
   onGenerationChange,
-  onSubjects,
   subject,
 }: {
+  onBack: () => void;
+  onDeleteGenerated: (
+    content: GeneratedContent,
+    onDeleted?: (content: GeneratedContent) => void,
+  ) => void;
   onGenerationChange: (active: boolean) => void;
-  onSubjects: () => void;
   subject: Subject;
 }) {
   const [topicSet, setTopicSet] = useState<GeneratedContent | null>(null);
@@ -1647,20 +1744,44 @@ function ExamPrepPage({
     >
       <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
         <div>
+          <button
+            className="mb-4 flex items-center gap-2 text-sm font-medium text-text-secondary transition duration-150 ease-out hover:text-text-primary"
+            onClick={onBack}
+            type="button"
+          >
+            <ArrowLeft aria-hidden="true" className="h-4 w-4" />
+            Exam Prep
+          </button>
           <p className="font-mono text-xs font-medium uppercase text-accent">Exam Prep</p>
           <h1 className="mt-2 text-3xl font-semibold text-text-primary">{subject.name}</h1>
           <p className="mt-2 max-w-2xl text-sm leading-6 text-text-secondary">
-            Choose which predicted important topics should shape the upcoming exam prep pack.
+            Generate quick study materials or build a focused exam prep pack from predicted topics.
           </p>
         </div>
-        <button
-          className="inline-flex h-10 items-center justify-center gap-2 rounded-lg border border-border px-4 text-sm font-medium text-text-secondary transition duration-150 ease-out hover:-translate-y-px hover:text-text-primary hover:shadow-interactive"
-          onClick={onSubjects}
-          type="button"
-        >
-          <Folder aria-hidden="true" className="h-4 w-4" />
-          Subjects
-        </button>
+      </div>
+
+      <section className="space-y-4">
+        <div>
+          <p className="font-mono text-xs font-medium uppercase text-accent">Section A</p>
+          <h2 className="mt-2 text-2xl font-semibold text-text-primary">Quick Study Tools</h2>
+          <p className="mt-1 max-w-2xl text-sm leading-6 text-text-secondary">
+            Generate individual summaries, MCQs, flashcards, predicted topics, or short/long questions.
+          </p>
+        </div>
+        <StudyToolsPanel
+          clearSignal={0}
+          onDeleteGenerated={onDeleteGenerated}
+          onGenerationChange={onGenerationChange}
+          subject={subject}
+        />
+      </section>
+
+      <div className="border-t border-border pt-6">
+        <p className="font-mono text-xs font-medium uppercase text-accent">Section B</p>
+        <h2 className="mt-2 text-2xl font-semibold text-text-primary">Exam Prep Pack</h2>
+        <p className="mt-1 max-w-2xl text-sm leading-6 text-text-secondary">
+          Select predicted topics, then generate a combined summary, MCQs, and short/long question pack.
+        </p>
       </div>
 
       <section className="rounded-lg border border-border bg-surface p-5">
@@ -1857,15 +1978,85 @@ function getSelectedChunkIdsFromTopics(
 
 function SettingsPage({
   llmConfig,
+  onDeleteAllChats,
+  onDeleteAllGeneratedContent,
+  onDeleteAllSubjects,
   onRefresh,
   onToggleTheme,
   theme,
 }: {
   llmConfig: LlmConfigState;
+  onDeleteAllChats: () => Promise<string>;
+  onDeleteAllGeneratedContent: () => Promise<string>;
+  onDeleteAllSubjects: () => Promise<string>;
   onRefresh: () => void;
   onToggleTheme: () => void;
   theme: "light" | "dark";
 }) {
+  type DataStorageAction = "subjects" | "chats" | "generated";
+
+  const [pendingAction, setPendingAction] = useState<DataStorageAction | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [statusMessage, setStatusMessage] = useState<{
+    type: "success" | "error";
+    message: string;
+  } | null>(null);
+
+  const actions: Record<
+    DataStorageAction,
+    {
+      label: string;
+      description: string;
+      confirmTitle: string;
+      confirmMessage: string;
+      handler: () => Promise<string>;
+    }
+  > = {
+    subjects: {
+      label: "Delete all subjects",
+      description: "Permanently delete every subject, document, chat, and generated study set.",
+      confirmTitle: "Delete all subjects?",
+      confirmMessage:
+        "Delete ALL subjects? This will permanently erase everything in your workspace and cannot be undone.",
+      handler: onDeleteAllSubjects,
+    },
+    chats: {
+      label: "Delete all chats",
+      description:
+        "Permanently delete all chat sessions and messages across every subject, keeping subjects, documents, and generated study sets intact.",
+      confirmTitle: "Delete all chats?",
+      confirmMessage: "Delete ALL chat history across every subject? This cannot be undone.",
+      handler: onDeleteAllChats,
+    },
+    generated: {
+      label: "Delete all study sets",
+      description:
+        "Permanently delete all generated summaries, MCQs, flashcards, and exam prep packs across every subject, keeping subjects, documents, and chat history intact.",
+      confirmTitle: "Delete all study sets?",
+      confirmMessage: "Delete ALL generated study sets across every subject? This cannot be undone.",
+      handler: onDeleteAllGeneratedContent,
+    },
+  };
+  const pendingActionDetails = pendingAction ? actions[pendingAction] : null;
+
+  async function confirmDataStorageAction() {
+    if (!pendingActionDetails) {
+      return;
+    }
+
+    setIsDeleting(true);
+    setStatusMessage(null);
+    try {
+      const message = await pendingActionDetails.handler();
+      setStatusMessage({ type: "success", message });
+      setPendingAction(null);
+    } catch (error) {
+      setStatusMessage({ type: "error", message: getMessage(error) });
+    } finally {
+      setIsDeleting(false);
+    }
+  }
+
   return (
     <motion.section
       animate={{ opacity: 1, y: 0 }}
@@ -1905,6 +2096,48 @@ function SettingsPage({
       </section>
 
       <section className="rounded-lg border border-border bg-surface p-5">
+        <div>
+          <h2 className="text-lg font-semibold text-text-primary">Data & Storage</h2>
+          <p className="mt-1 text-sm text-text-secondary">
+            Destructive workspace cleanup actions. These changes cannot be undone.
+          </p>
+        </div>
+
+        {statusMessage && (
+          <div
+            className={`mt-4 rounded-lg border px-4 py-3 text-sm font-medium ${
+              statusMessage.type === "success"
+                ? "border-accent-soft bg-accent-soft text-accent"
+                : "border-red-100 bg-red-50 text-error dark:border-red-950/40 dark:bg-red-950/30"
+            }`}
+          >
+            {statusMessage.message}
+          </div>
+        )}
+
+        <div className="mt-5 divide-y divide-border rounded-lg border border-border">
+          <DataStorageActionRow
+            description={actions.subjects.description}
+            disabled={isDeleting}
+            label={actions.subjects.label}
+            onDelete={() => setPendingAction("subjects")}
+          />
+          <DataStorageActionRow
+            description={actions.chats.description}
+            disabled={isDeleting}
+            label={actions.chats.label}
+            onDelete={() => setPendingAction("chats")}
+          />
+          <DataStorageActionRow
+            description={actions.generated.description}
+            disabled={isDeleting}
+            label={actions.generated.label}
+            onDelete={() => setPendingAction("generated")}
+          />
+        </div>
+      </section>
+
+      <section className="rounded-lg border border-border bg-surface p-5">
         <h2 className="text-lg font-semibold text-text-primary">LLM provider</h2>
         <p className="mt-1 text-sm text-text-secondary">Read-only configuration loaded by the backend.</p>
         <div className="mt-5">
@@ -1923,7 +2156,55 @@ function SettingsPage({
           )}
         </div>
       </section>
+
+      <AnimatePresence>
+        {pendingActionDetails && (
+          <ConfirmDialog
+            cancelLabel="Cancel"
+            confirmLabel={isDeleting ? "Deleting..." : "Delete"}
+            isDangerous
+            message={pendingActionDetails.confirmMessage}
+            onCancel={() => {
+              if (!isDeleting) {
+                setPendingAction(null);
+              }
+            }}
+            onConfirm={confirmDataStorageAction}
+            title={pendingActionDetails.confirmTitle}
+          />
+        )}
+      </AnimatePresence>
     </motion.section>
+  );
+}
+
+function DataStorageActionRow({
+  description,
+  disabled,
+  label,
+  onDelete,
+}: {
+  label: string;
+  description: string;
+  disabled: boolean;
+  onDelete: () => void;
+}) {
+  return (
+    <div className="flex flex-col gap-3 bg-surface px-4 py-4 first:rounded-t-lg last:rounded-b-lg md:flex-row md:items-center md:justify-between">
+      <div>
+        <h3 className="text-sm font-semibold text-text-primary">{label}</h3>
+        <p className="mt-1 text-sm leading-6 text-text-secondary">{description}</p>
+      </div>
+      <button
+        className="inline-flex h-10 shrink-0 items-center justify-center gap-2 rounded-lg bg-error px-4 text-sm font-medium text-white transition duration-150 ease-out hover:-translate-y-px hover:shadow-interactive disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:translate-y-0 disabled:hover:shadow-none"
+        disabled={disabled}
+        onClick={onDelete}
+        type="button"
+      >
+        <Trash2 aria-hidden="true" className="h-4 w-4" />
+        Delete
+      </button>
+    </div>
   );
 }
 
@@ -1943,10 +2224,8 @@ function SubjectDetail({
   isUploading,
   onBack,
   onDeleteDocument,
-  onDeleteGenerated,
   onRenameSubject,
   onRefresh,
-  onStudyGenerationChange,
   onUpload,
   refInput,
   subject,
@@ -1958,13 +2237,8 @@ function SubjectDetail({
   isUploading: boolean;
   onBack: () => void;
   onDeleteDocument: (document: DocumentRecord) => void;
-  onDeleteGenerated: (
-    content: GeneratedContent,
-    onDeleted?: (content: GeneratedContent) => void,
-  ) => void;
   onRenameSubject: (subjectId: number, name: string) => Promise<void>;
   onRefresh: () => void;
-  onStudyGenerationChange: (active: boolean) => void;
   onUpload: (file: File | undefined) => void;
   refInput: RefObject<HTMLInputElement>;
   subject: Subject;
@@ -2093,30 +2367,44 @@ function SubjectDetail({
       </div>
 
       <ChatPanel subject={subject} />
-      <StudyToolsPanel
-        onDeleteGenerated={onDeleteGenerated}
-        onGenerationChange={onStudyGenerationChange}
-        subject={subject}
-      />
     </motion.section>
   );
 }
 
-function ChatPanel({ subject }: { subject: Subject }) {
+function ChatPanel({ clearSignal = 0, subject }: { clearSignal?: number; subject: Subject }) {
   const [question, setQuestion] = useState("");
   const [mode, setMode] = useState<ExplanationMode>("university");
   const [turns, setTurns] = useState<ChatTurn[]>([]);
   const [history, setHistory] = useState<ChatHistoryState>({ status: "loading" });
   const [activeSessionId, setActiveSessionId] = useState<number | null>(null);
   const [isAnswering, setIsAnswering] = useState(false);
+  const [pendingDeleteSession, setPendingDeleteSession] = useState<ChatHistorySession | null>(null);
+  const [deletingSessionId, setDeletingSessionId] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const messageThreadRef = useRef<HTMLDivElement | null>(null);
+  const lastClearSignalRef = useRef(clearSignal);
 
   useEffect(() => {
     setTurns([]);
     setActiveSessionId(null);
+    setPendingDeleteSession(null);
+    setDeletingSessionId(null);
     loadHistory();
   }, [subject.id]);
+
+  useEffect(() => {
+    if (lastClearSignalRef.current === clearSignal) {
+      return;
+    }
+
+    lastClearSignalRef.current = clearSignal;
+    setTurns([]);
+    setActiveSessionId(null);
+    setPendingDeleteSession(null);
+    setDeletingSessionId(null);
+    setError(null);
+    loadHistory();
+  }, [clearSignal]);
 
   useEffect(() => {
     const messageThread = messageThreadRef.current;
@@ -2153,6 +2441,39 @@ function ChatPanel({ subject }: { subject: Subject }) {
     setActiveSessionId(null);
     setTurns([]);
     setError(null);
+  }
+
+  async function confirmDeleteSession() {
+    if (!pendingDeleteSession) {
+      return;
+    }
+
+    const sessionToDelete = pendingDeleteSession;
+    setPendingDeleteSession(null);
+    setDeletingSessionId(sessionToDelete.id);
+    setError(null);
+
+    try {
+      await deleteChatSession(subject.id, sessionToDelete.id);
+      setHistory((current) => {
+        if (current.status !== "ready") {
+          return current;
+        }
+
+        return {
+          status: "ready",
+          data: current.data.filter((session) => session.id !== sessionToDelete.id),
+        };
+      });
+
+      if (activeSessionId === sessionToDelete.id) {
+        startNewSession();
+      }
+    } catch (caughtError) {
+      setError(getMessage(caughtError));
+    } finally {
+      setDeletingSessionId(null);
+    }
   }
 
   async function handleAsk(event: FormEvent<HTMLFormElement>) {
@@ -2219,7 +2540,8 @@ function ChatPanel({ subject }: { subject: Subject }) {
   }
 
   return (
-    <section className="rounded-lg border border-border bg-surface p-5">
+    <>
+      <section className="rounded-lg border border-border bg-surface p-5">
       <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
         <div className="flex items-center gap-3">
           <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-accent-soft text-accent">
@@ -2276,24 +2598,43 @@ function ChatPanel({ subject }: { subject: Subject }) {
             )}
             {history.status === "ready" &&
               history.data.map((session) => (
-                <button
-                  aria-pressed={activeSessionId === session.id}
-                  className={`w-full rounded-lg border p-3 text-left transition duration-150 ease-out hover:-translate-y-px hover:shadow-interactive ${
+                <div
+                  className={`group flex items-start gap-2 rounded-lg border p-2 transition duration-150 ease-out hover:-translate-y-px hover:shadow-interactive ${
                     activeSessionId === session.id
                       ? "border-accent bg-accent-soft"
                       : "border-border bg-surface"
                   }`}
                   key={session.id}
-                  onClick={() => openSession(session)}
-                  type="button"
                 >
-                  <p className="line-clamp-2 text-sm font-medium text-text-primary">
-                    {session.title}
-                  </p>
-                  <p className="mt-1 text-xs text-text-secondary">
-                    {new Date(session.created_at).toLocaleString()}
-                  </p>
-                </button>
+                  <button
+                    aria-label={`Open chat session ${session.title}`}
+                    aria-pressed={activeSessionId === session.id}
+                    className="min-w-0 flex-1 rounded-md p-1 text-left"
+                    onClick={() => openSession(session)}
+                    type="button"
+                  >
+                    <p className="line-clamp-2 text-sm font-medium text-text-primary">
+                      {session.title}
+                    </p>
+                    <p className="mt-1 text-xs text-text-secondary">
+                      {new Date(session.created_at).toLocaleString()}
+                    </p>
+                  </button>
+                  <button
+                    aria-label={`Delete chat session ${session.title}`}
+                    className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-border bg-surface text-text-secondary transition duration-150 ease-out hover:-translate-y-px hover:border-error hover:text-error hover:shadow-interactive disabled:cursor-not-allowed disabled:opacity-60"
+                    disabled={deletingSessionId === session.id}
+                    onClick={() => setPendingDeleteSession(session)}
+                    title="Delete chat session"
+                    type="button"
+                  >
+                    {deletingSessionId === session.id ? (
+                      <SkeletonDot className="h-3.5 w-3.5" tone="surface" />
+                    ) : (
+                      <Trash2 aria-hidden="true" className="h-3.5 w-3.5" />
+                    )}
+                  </button>
+                </div>
               ))}
           </div>
         </aside>
@@ -2372,15 +2713,31 @@ function ChatPanel({ subject }: { subject: Subject }) {
           </form>
         </div>
       </div>
-    </section>
+      </section>
+      <AnimatePresence>
+        {pendingDeleteSession && (
+          <ConfirmDialog
+            cancelLabel="Cancel"
+            confirmLabel="Delete"
+            isDangerous
+            message="Delete this chat session? This cannot be undone."
+            onCancel={() => setPendingDeleteSession(null)}
+            onConfirm={confirmDeleteSession}
+            title="Delete chat session?"
+          />
+        )}
+      </AnimatePresence>
+    </>
   );
 }
 
 function StudyToolsPanel({
+  clearSignal,
   onDeleteGenerated,
   onGenerationChange,
   subject,
 }: {
+  clearSignal: number;
   onDeleteGenerated: (
     content: GeneratedContent,
     onDeleted?: (content: GeneratedContent) => void,
@@ -2397,11 +2754,27 @@ function StudyToolsPanel({
   const [mcqAnswers, setMcqAnswers] = useState<Record<number, number>>({});
   const [flippedCards, setFlippedCards] = useState<Record<number, boolean>>({});
   const [cardStates, setCardStates] = useState<Record<number, string>>({});
+  const lastClearSignalRef = useRef(clearSignal);
 
   useEffect(() => {
     setGenerated(null);
     loadGeneratedSets();
   }, [subject.id]);
+
+  useEffect(() => {
+    if (lastClearSignalRef.current === clearSignal) {
+      return;
+    }
+
+    lastClearSignalRef.current = clearSignal;
+    setGenerated(null);
+    setGeneratedSets({ status: "ready", data: [] });
+    setMcqAnswers({});
+    setFlippedCards({});
+    setCardStates({});
+    setError(null);
+    loadGeneratedSets();
+  }, [clearSignal]);
 
   useEffect(() => {
     onGenerationChange(isGenerating);
@@ -3568,6 +3941,14 @@ function getInitialTheme(): "light" | "dark" {
   }
 
   return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+}
+
+function getInitialSidebarCollapsed(): boolean {
+  try {
+    return window.localStorage.getItem("pageturn-sidebar-collapsed") === "true";
+  } catch {
+    return false;
+  }
 }
 
 function isTerminalStatus(status: DocumentRecord["upload_status"]): boolean {
